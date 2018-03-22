@@ -111,7 +111,7 @@ public:
 	{
 		guard(FLeadArchiveReader::ReadPageTable);
 		int NumPages = (FileSize + BufferSize - 1) / BufferSize;
-		Pages.Add(NumPages);
+		Pages.AddZeroed(NumPages);
 		int Remaining = FileSize;
 		int NumPages2;
 		Ar << AR_INDEX(NumPages2);	// unused
@@ -368,7 +368,7 @@ public:
 				const FLeadDirEntry& Dir = Hdr.dir[j];
 				if (Dir.id == List.id)
 				{
-					FileName = Dir.Filename;
+					FileName = *Dir.Filename;
 					break;
 				}
 			}
@@ -386,7 +386,7 @@ public:
 			appSprintf(ARRAY_ARG(FullFileName), "%s/%s", OutDir, FileName);
 			appMakeDirectoryForFile(FullFileName);
 			FILE *f = fopen(FullFileName, "rb+");				// open for update
-			if (!f) f = fopen(FullFileName, "wb");				// open for writting
+			if (!f) f = fopen(FullFileName, "wb");				// open for writing
 			if (!f)
 			{
 				appPrintf("ERROR: unable to open file \"%s\"\n", FullFileName);

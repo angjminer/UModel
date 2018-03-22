@@ -97,8 +97,8 @@ inline void InvalidateContext()
 #define DEFAULT_FOV				80
 #define MIN_DIST				25
 #define MAX_DIST				2048
-#define CLEAR_COLOR				0.05, 0.05, 0.05, 1
-#define CLEAR_COLOR2			0.2, 0.2, 0.2, 1
+#define CLEAR_COLOR				0.05f, 0.05f, 0.05f, 1.0f
+#define CLEAR_COLOR2			0.2f, 0.2f, 0.2f, 1.0f
 //#define CLEAR_COLOR			0.3, 0.4, 0.6, 1
 //#define CLEAR_COLOR2			0.2, 0.4, 0.3, 1
 //#define CLEAR_COLOR			0.5, 0.6, 0.7, 1
@@ -125,9 +125,10 @@ static float modelMatrix[4][4];
 // view state
 static CVec3 viewAngles;
 static float viewDist   = 0;
-static CVec3 viewOrigin = { -DEFAULT_DIST, 0, 0 };
 static CVec3 rotOrigin  = {0, 0, 0};
 static CVec3 viewOffset = {0, 0, 0};
+// camera transform
+       CVec3 viewOrigin = { -DEFAULT_DIST, 0, 0 };
        CAxis viewAxis;				// generated from angles
 
 // view params (const)
@@ -240,7 +241,6 @@ static void LoadFont()
 {
 	// decompress font texture
 	byte *pic = (byte*)appMalloc(TEX_WIDTH * TEX_HEIGHT * 4);
-	int i;
 	const byte *p;
 	byte *dst;
 
@@ -1112,9 +1112,9 @@ void CApplication::Display()
 	Set3Dmode();
 
 	// enable lighting
-	static const float lightPos[4]      = {1000, 2000, 2000, 0};
-	static const float lightAmbient[4]  = {0.1, 0.1, 0.15, 1};
-	static const float specIntens[4]    = {0.4, 0.4, 0.4,  0};
+	static const float lightPos[4]      = {1000, 2000, 2000,  0};
+	static const float lightAmbient[4]  = {0.1f, 0.1f, 0.15f, 1};
+	static const float specIntens[4]    = {0.4f, 0.4f, 0.4f,  0};
 	static const float black[4]         = {0,   0,   0,    0};
 	static const float white[4]         = {1,   1,   1,    0};
 	glEnable(GL_COLOR_MATERIAL);
@@ -1232,10 +1232,12 @@ void CApplication::ProcessKey(int key, bool isDown)
 		ResetView();
 		break;
 	case SPEC_KEY(PAGEUP)|KEY_CTRL:
+	case SDLK_KP_9|KEY_CTRL:
 		textOffset += TEXT_SCROLL_LINES;
 		if (textOffset > 0) textOffset = 0;
 		break;
 	case SPEC_KEY(PAGEDOWN)|KEY_CTRL:
+	case SDLK_KP_3|KEY_CTRL:
 		textOffset -= TEXT_SCROLL_LINES;
 		break;
 #if LIGHTING_MODES
@@ -1319,8 +1321,8 @@ static int TranslateKey(int sym, int scan)
 {
 	static const struct
 	{
-		word scan;
-		word sym;
+		uint16 scan;
+		uint16 sym;
 	} scanToSym[] =
 	{
 		SDL_SCANCODE_LEFTBRACKET, '[',

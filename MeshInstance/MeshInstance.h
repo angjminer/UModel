@@ -1,5 +1,5 @@
-#ifndef __MESHINSTANCE_H__
-#define __MESHINSTANCE_H__
+#ifndef __MESH_INSTANCE_H__
+#define __MESH_INSTANCE_H__
 
 // forwards
 class UVertMesh;
@@ -21,7 +21,6 @@ class CMeshInstance
 {
 public:
 	// common properties
-	CCoords			BaseTransform;			// rotation for mesh; have identity axis
 	CCoords			BaseTransformScaled;	// rotation for mesh with scaled axis
 	// debug
 	bool			bColorMaterials;		//?? replace with DF_COLOR_MATERIALS, but flags are stored outside of mesh and used in MeshInstance::SetMaterial()
@@ -99,7 +98,7 @@ protected:
 	TArray<CMeshSection>	Sections;
 	CVec3					*Verts;				// deformed mesh, used in Draw() only
 	CVec3					*Normals;
-	word					*Indices;			// index buffer
+	uint16					*Indices;			// index buffer
 
 	int FindAnim(const char *AnimName) const;
 	void PlayAnimInternal(const char *AnimName, float Rate, bool Looped);
@@ -255,7 +254,7 @@ protected:
 		assert(StageIndex >= 0 && StageIndex < MAX_SKELANIMCHANNELS);
 		return Channels[StageIndex];
 	}
-	void TransformMesh();
+	void SkinMeshVerts();
 	int FindBone(const char *BoneName) const;
 	const CAnimSequence *FindAnim(const char *AnimName) const;
 	void PlayAnimInternal(const char *AnimName, float Rate, float TweenTime, int Channel, bool Looped);
@@ -277,11 +276,10 @@ public:
 	,	UVIndex(0)
 	{}
 
+	~CStatMeshInstance();
+
 	// not 'const *mesh' because can call BuildTangents()
-	void SetMesh(CStaticMesh *Mesh)
-	{
-		pMesh = Mesh;
-	}
+	void SetMesh(CStaticMesh *Mesh);
 
 	virtual void Draw(unsigned flags = 0);
 
@@ -294,4 +292,4 @@ protected:
 };
 
 
-#endif // __MESHINSTANCE_H__
+#endif // __MESH_INSTANCE_H__

@@ -5,6 +5,7 @@
 
 #include "ObjectViewer.h"
 #include "../MeshInstance/MeshInstance.h"
+#include "MeshCommon.h"
 
 
 CMeshViewer::~CMeshViewer()
@@ -60,8 +61,50 @@ void CMeshViewer::Draw3D(float TimeDelta)
 
 void CMeshViewer::DrawMesh(CMeshInstance *Inst)
 {
-	unsigned flags = 0;
 	Inst->Draw(DrawFlags);
+}
+
+
+void CMeshViewer::DisplayUV(const CMeshVertex* Verts, int VertexSize, const CBaseMeshLod* Mesh, int UVIndex)
+{
+	guard(CMeshViewer::DisplayUV);
+
+	int width, height;
+	Window->GetWindowSize(width, height);
+	int w = min(width, height);
+
+	// add some border
+	int x0 = width - w;
+	int y0 = 10;
+	w -= 20;
+
+	glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
+
+	for (int MaterialIndex = 0; MaterialIndex < Mesh->Sections.Num(); MaterialIndex++)
+	{
+		const CMeshSection &Sec = Mesh->Sections[MaterialIndex];
+		if (!Sec.NumFaces) continue;
+
+		BindDefaultMaterial(true);
+		glDisable(GL_CULL_FACE);
+		unsigned color = CMeshInstance::GetMaterialDebugColor(MaterialIndex);
+		glColor4ubv((GLubyte*)&color);
+
+		CIndexBuffer::IndexAccessor_t Index = Mesh->Indices.GetAccessor();
+
+		glBegin(GL_TRIANGLES);
+		for (int i = Sec.FirstIndex; i < Sec.FirstIndex + Sec.NumFaces * 3; i++)
+		{
+			int VertIndex = Index(i);
+			const CMeshVertex* V = OffsetPointer(Verts, VertIndex * VertexSize);
+			const CMeshUVFloat& UV = (UVIndex == 0) ? V->UV : Mesh->ExtraUV[UVIndex-1][VertIndex];
+			glVertex2f(UV.U * w + x0, UV.V * w + y0);
+		}
+		glEnd();
+	}
+
+	glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+	unguard;
 }
 
 
@@ -76,6 +119,7 @@ void CMeshViewer::ShowHelp()
 
 void CMeshViewer::ProcessKey(int key)
 {
+	guard(CMeshViewer::ProcessKey);
 	switch (key)
 	{
 	case 'n':
@@ -93,6 +137,7 @@ void CMeshViewer::ProcessKey(int key)
 	default:
 		CObjectViewer::ProcessKey(key);
 	}
+	unguard;
 }
 
 

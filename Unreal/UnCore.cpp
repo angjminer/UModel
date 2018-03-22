@@ -2,8 +2,9 @@
 #include "UnCore.h"
 
 
-int  GForceGame     = GAME_UNKNOWN;
-byte GForcePlatform = PLATFORM_UNKNOWN;
+int  GForceGame           = GAME_UNKNOWN;
+int  GForcePackageVersion = 0;
+byte GForcePlatform       = PLATFORM_UNKNOWN;
 
 
 #if PROFILE
@@ -23,7 +24,7 @@ void appPrintProfiler()
 {
 	if (ProfileStartTime == -1) return;
 	float timeDelta = (appMilliseconds() - ProfileStartTime) / 1000.0f;
-	if (timeDelta < 0.01f && !GNumAllocs && !GSerializeBytes && !GNumSerialize)
+	if (timeDelta < 0.001f && !GNumAllocs && !GSerializeBytes && !GNumSerialize)
 		return;		// perhaps already printed?
 	appPrintf("Loaded in %.2g sec, %d allocs, %.2f MBytes serialized in %d calls.\n",
 		timeDelta, GNumAllocs, GSerializeBytes / (1024.0f * 1024.0f), GNumSerialize);
@@ -43,58 +44,67 @@ FArray::~FArray()
 	{
 		if (DataPtr)
 			appFree(DataPtr);
-		DataPtr  = NULL;
-		MaxCount = 0;
 	}
 	DataCount = 0;
+	DataPtr   = NULL;
+	MaxCount  = 0;
 }
 
 void FArray::Empty(int count, int elementSize)
 {
 	guard(FArray::Empty);
 
+	DataCount = 0;
+
 	if (IsStatic())
 	{
-		if (count > MaxCount) goto allocate; // "static" array becomes non-static
-		DataCount = 0;
-		memset(DataPtr, 0, count * elementSize);
-		return;
+		if (count <= MaxCount)
+			return;
+		// "static" array becomes non-static, invalidate data pointer
+		DataPtr = NULL;
 	}
 
+	//!! TODO: perhaps round up 'Max' to 16 bytes, allow comparison below to be 'softer'
+	//!! (i.e. when array is 16 items, and calling Empty(15) - don't reallicate it, unless
+	//!! item size is large
 	if (DataPtr)
+	{
+		// check if we need to release old array
+		if (count == MaxCount)
+		{
+			// the size was not changed
+			return;
+		}
+		// delete old memory block
 		appFree(DataPtr);
+		DataPtr = NULL;
+	}
 
-allocate:
-	DataPtr   = NULL;
-	DataCount = 0;
-	MaxCount  = count;
+	MaxCount = count;
+
 	if (count)
 	{
 		DataPtr = appMalloc(count * elementSize);
-		memset(DataPtr, 0, count * elementSize);
 	}
+
 	unguardf("%d x %d", count, elementSize);
 }
 
-
-void FArray::Add(int count, int elementSize)
+// This method will grow array's MaxCount. No items will be allocated.
+// The allocated memory is not initialized because items could be inserted
+// and removed at any time - so initialization should be performed in
+// upper level functions like Insert()
+void FArray::GrowArray(int count, int elementSize)
 {
-	Insert(0, count, elementSize);
-}
+	guard(FArray::GrowArray);
+	assert(count > 0);
 
+	int prevCount = MaxCount;
 
-void FArray::Insert(int index, int count, int elementSize)
-{
-	guard(FArray::Insert);
-	assert(index >= 0);
-	assert(index <= DataCount);
-	assert(count >= 0);
-	if (!count) return;
 	// check for available space
 	if (DataCount + count > MaxCount)
 	{
 		// not enough space, resize ...
-		int prevCount = MaxCount;
 		MaxCount = ((DataCount + count + 15) / 16) * 16 + 16;
 		if (!IsStatic())
 		{
@@ -107,21 +117,44 @@ void FArray::Insert(int index, int count, int elementSize)
 			DataPtr = appMalloc(MaxCount * elementSize);
 			memcpy(DataPtr, oldData, prevCount * elementSize);
 		}
-		// zero added memory
-		memset(
-			(byte*)DataPtr + prevCount * elementSize,
-			0,
-			(MaxCount - prevCount) * elementSize
+	}
+
+	unguardf("%d x %d", count, elementSize);
+}
+
+void FArray::InsertUninitialized(int index, int count, int elementSize)
+{
+	guard(FArray::InsertUninitialized);
+	assert(index >= 0);
+	assert(index <= DataCount);
+	assert(count >= 0);
+	if (!count) return;
+	GrowArray(count, elementSize);
+	// move data
+	if (index != DataCount)
+	{
+		memmove(
+			(byte*)DataPtr + (index + count)     * elementSize,
+			(byte*)DataPtr + index               * elementSize,
+							 (DataCount - index) * elementSize
 		);
 	}
-	// move data
-	memmove(
-		(byte*)DataPtr + (index + count)     * elementSize,
-		(byte*)DataPtr + index               * elementSize,
-						 (DataCount - index) * elementSize
-	);
+#if DEBUG_MEMORY
+	// fill memory with some pattern for debugging
+	memset((byte*)DataPtr + index * elementSize, 0xCC, count * elementSize);
+#endif
 	// last operation: advance counter
 	DataCount += count;
+	unguard;
+}
+
+void FArray::InsertZeroed(int index, int count, int elementSize)
+{
+	guard(FArray::InsertZeroed);
+	if (!count) return;
+	InsertUninitialized(index, count, elementSize);
+	// zero memory which was inserted
+	memset((byte*)DataPtr + index * elementSize, 0, count * elementSize);
 	unguard;
 }
 
@@ -147,9 +180,9 @@ void FArray::Remove(int index, int count, int elementSize)
 }
 
 
-void FArray::FastRemove(int index, int count, int elementSize)
+void FArray::RemoveAtSwap(int index, int count, int elementSize)
 {
-	guard(FArray::FastRemove);
+	guard(FArray::RemoveAtSwap);
 	assert(index >= 0);
 	assert(count > 0);
 	assert(index + count <= DataCount);
@@ -183,10 +216,8 @@ void FArray::RawCopy(const FArray &Src, int elementSize)
 
 void* FArray::GetItem(int index, int elementSize) const
 {
-	guard(operator[]);
-	assert(index >= 0 && index < DataCount);
+	if (!IsValidIndex(index)) appError("TArray: index %d is out of range (%d)", index, DataCount);
 	return OffsetPointer(DataPtr, index * elementSize);
-	unguardf("%d/%d", index, DataCount);
 }
 
 
@@ -198,72 +229,135 @@ FString::FString(const char* src)
 {
 	if (!src)
 	{
-		Add(1);					// null char
+		Data.AddZeroed(1);		// null char
 	}
 	else
 	{
 		int len = strlen(src) + 1;
-		Add(len);
-		memcpy(DataPtr, src, len);
+		Data.AddUninitialized(len);
+		memcpy(Data.GetData(), src, len);
 	}
 }
 
+FString::FString(const FString& Other)
+{
+	CopyArray(Data, Other.Data);
+}
+
+FString& FString::operator=(const FString& src)
+{
+	CopyArray(Data, src.Data);
+	return *this;
+}
 
 FString& FString::operator=(const char* src)
 {
-	if (src == DataPtr)
+	if (src == Data.GetData())
 		return *this; // assigning to self
 
 	Empty();
 	if (!src)
 	{
-		Add(1);					// null char
+		Data.AddZeroed(1);		// null char
 	}
 	else
 	{
 		int len = strlen(src) + 1;
-		Add(len);
-		memcpy(DataPtr, src, len);
+		Data.AddUninitialized(len);
+		memcpy(Data.GetData(), src, len);
 	}
 	return *this;
 }
-
 
 FString& FString::operator+=(const char* text)
 {
 	int len = strlen(text);
-	int oldLen = Num();
+	int oldLen = Data.Num();
 	if (oldLen)
 	{
-		Add(len);
+		Data.AddUninitialized(len);
 		// oldLen-1 -- cut null char, len+1 -- append null char
-		memcpy(OffsetPointer(DataPtr, oldLen-1), text, len+1);
+		memcpy(OffsetPointer(Data.GetData(), oldLen-1), text, len+1);
 	}
 	else
 	{
-		Add(len+1);	// reserve space for null char
-		memcpy(DataPtr, text, len+1);
+		Data.AddUninitialized(len+1);	// reserve space for null char
+		memcpy(Data.GetData(), text, len+1);
 	}
 	return *this;
 }
 
+FString& FString::AppendChar(char ch)
+{
+	if (Data.Num() == 0)
+	{
+		// empty array - should add a char and null byte
+		Data.AddZeroed(2);
+		Data[0] = ch;
+	}
+	else
+	{
+		// not a empty string, should add one null
+		int nullCharIndex = Data.Num() - 1;
+		Data[nullCharIndex] = ch;
+		Data.AddZeroed(1);
+	}
+	return *this;
+}
 
 char* FString::Detach()
 {
-	char* data;
-	if (IsStatic())
+	char* RetData;
+	if (Data.IsStatic())
 	{
-		data = appStrdup((char*)DataPtr);
+		RetData = appStrdup((char*)Data.DataPtr);
 		// clear string
-		DataCount = 0;
-		*(char*)DataPtr = 0;
-		return data;
+		Data.DataCount = 0;
+		*(char*)Data.DataPtr = 0;
 	}
-	data = (char*)DataPtr;
-	DataPtr   = NULL;
-	DataCount = 0;
-	MaxCount  = 0;
-	return data;
+	else
+	{
+		RetData = (char*)Data.DataPtr;
+		Data.DataPtr   = NULL;
+		Data.DataCount = 0;
+		Data.MaxCount  = 0;
+	}
+	return RetData;
+}
+
+bool FString::StartsWith(const char* Text)
+{
+	if (!Text || !Text[0] || IsEmpty()) return false;
+	return (strncmp(Data.GetData(), Text, strlen(Text)) == 0);
+}
+
+bool FString::EndsWith(const char* Text)
+{
+	if (!Text || !Text[0] || IsEmpty()) return false;
+	int len = strlen(Text);
+	if (len > Data.Num()) return false;
+	return (strncmp(Data.GetData() + Data.Num() - len, Text, len) == 0);
+}
+
+bool FString::RemoveFromStart(const char* Text)
+{
+	if (StartsWith(Text))
+	{
+		RemoveAt(0, strlen(Text));
+		return true;
+	}
+	return false;
+}
+
+bool FString::RemoveFromEnd(const char* Text)
+{
+	if (EndsWith(Text))
+	{
+		int len = strlen(Text);
+		RemoveAt(Len() - len, len);
+		return true;
+	}
+	return false;
 }
 
 

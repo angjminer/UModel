@@ -47,6 +47,7 @@ class UVertMesh;
 class UUnrealMaterial;
 class USound;
 class USoundNodeWave;
+class USoundWave;
 class USwfMovie;
 class UFaceFXAnimSet;
 class UFaceFXAsset;
@@ -71,36 +72,11 @@ void ExportMaterial(const UUnrealMaterial *Mat);
 // sound
 void ExportSound(const USound *Snd);
 void ExportSoundNodeWave(const USoundNodeWave *Snd);
+void ExportSoundWave4(const USoundWave *Snd);
 // third party
 void ExportGfx(const USwfMovie *Swf);
 void ExportFaceFXAnimSet(const UFaceFXAnimSet *Fx);
 void ExportFaceFXAsset(const UFaceFXAsset *Fx);
-
-// service functions
-//?? place implementation to cpp?
-struct UniqueNameList
-{
-	struct Item
-	{
-		char Name[256];
-		int  Count;
-	};
-	TArray<Item> Items;
-
-	int RegisterName(const char *Name)
-	{
-		for (int i = 0; i < Items.Num(); i++)
-		{
-			Item &V = Items[i];
-			if (strcmp(V.Name, Name) != 0) continue;
-			return ++V.Count;
-		}
-		Item *N = new (Items) Item;
-		appStrncpyz(N->Name, Name, ARRAY_COUNT(N->Name));
-		N->Count = 1;
-		return 1;
-	}
-};
 
 void WriteTGA(FArchive &Ar, int width, int height, byte *pic);
 

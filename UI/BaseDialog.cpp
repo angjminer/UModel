@@ -1,10 +1,18 @@
+// Simple UI library.
+// Copyright (C) 2018 Konstantin Nosov
+// Licensed under the BSD license. See LICENSE.txt file in the project root for full license information.
+
 #if _WIN32
-#define WIN32_LEAN_AND_MEAN			// exclude rarely-used services from windown headers
+
+#define WIN32_LEAN_AND_MEAN			// exclude rarely-used services from windows headers
+#define _CRT_SECURE_NO_WARNINGS
+#undef UNICODE
+
 #include <windows.h>
 #include <CommCtrl.h>
 #include <ShellAPI.h>				// for ShellExecute
 #include <Shlwapi.h>				// for DllGetVersion stuff
-#endif
+#endif // _WIN32
 
 #include "BaseDialog.h"
 
@@ -54,7 +62,7 @@
 //#define DEBUG_WINDOWS_ERRORS		MAX_DEBUG
 
 //#define DEBUG_MULTILIST_SEL			1
-#define USE_EXPLORER_STYLE			1
+#define USE_EXPLORER_STYLE			1		// use modern control style whenever possible
 
 
 #define FIRST_DIALOG_ID				4000
@@ -110,6 +118,7 @@ UIElement::UIElement()
 ,	IsRadioButton(false)
 ,	Enabled(true)
 ,	Visible(true)
+,	IsUpdateLocked(false)
 ,	Parent(NULL)
 ,	NextChild(NULL)
 ,	Menu(NULL)
@@ -125,6 +134,18 @@ UIElement::~UIElement()
 const char* UIElement::ClassName() const
 {
 	return "UIElement";
+}
+
+void UIElement::LockUpdate()
+{
+	LockWindowUpdate(Wnd);
+	IsUpdateLocked = true;
+}
+
+void UIElement::UnlockUpdate()
+{
+	LockWindowUpdate(NULL);
+	IsUpdateLocked = false;
 }
 
 UIElement& UIElement::Enable(bool enable)
@@ -179,18 +200,66 @@ UIElement& UIElement::SetParent(UIGroup* group)
 	return *this;
 }
 
+UIBaseDialog* UIElement::GetDialog()
+{
+	UIElement* control;
+	for (control = this; control->Parent != NULL; control = control->Parent)
+	{
+		// empty
+	}
+	assert(control->IsA("UIBaseDialog"));
+	UIBaseDialog* dialog = static_cast<UIBaseDialog*>(control);
+	return dialog;
+}
+
 void UIElement::MeasureTextSize(const char* text, int* width, int* height, HWND wnd)
 {
 	guard(UIElement::MeasureTextSize);
 	if (!wnd) wnd = Wnd;
 	assert(wnd);
+	// set dialog's font for DC
 	HDC dc = GetDC(wnd);
 	HGDIOBJ oldFont = SelectObject(dc, (HFONT)SendMessage(wnd, WM_GETFONT, 0, 0));
+	// measure text size
 	SIZE size;
-	//?? probably use DrawText() with DT_CALCRECT instead of GetTextExtentPoint32()
-	GetTextExtentPoint32(dc, text, strlen(text), &size);
+	GetTextExtentPoint32(dc, text, (int)strlen(text), &size);
 	if (width) *width = size.cx;
 	if (height) *height = size.cy;
+	// restore font
+	SelectObject(dc, oldFont);
+	ReleaseDC(wnd, dc);
+	unguard;
+}
+
+void UIElement::MeasureTextVSize(const char* text, int* width, int* height, HWND wnd)
+{
+	guard(UIElement::MeasureTextVSize);
+	if (!wnd) wnd = Wnd;
+	assert(wnd);
+
+	// get control's width
+	int w = *width;
+	if (w < 0)
+	{
+		//!! see AllocateUISpace() for details, should separate common code in some way
+//		if (w == -1 && (Parent->Flags & GROUP_HORIZONTAL_LAYOUT))
+//			w = Parent->AutoWidth;
+//		else
+			w = int(DecodeWidth(w) * Parent->Width); //!! see parentWidth in AllocateUISpace()
+	}
+
+	// set dialog's font for DC
+	HDC dc = GetDC(wnd);
+	HGDIOBJ oldFont = SelectObject(dc, (HFONT)SendMessage(wnd, WM_GETFONT, 0, 0));
+	// measure text size
+	RECT rc;
+	rc.bottom = rc.top = 0;
+	rc.left = 0;
+	rc.right = w;
+	int h = DrawText(dc, text, -1, &rc, DT_CALCRECT | DT_WORDBREAK);
+	if (width) *width = rc.right - rc.left;
+	if (height) *height = h;
+	// restore font
 	SelectObject(dc, oldFont);
 	ReleaseDC(wnd, dc);
 	unguard;
@@ -238,6 +307,11 @@ HWND UIElement::Window(const wchar_t* className, const wchar_t* text, DWORD styl
 	SendMessage(wnd, WM_SETFONT, SendMessage(dialogWnd, WM_GETFONT, 0, 0), MAKELPARAM(TRUE, 0));
 
 	return wnd;
+}
+
+void UIElement::Repaint()
+{
+	InvalidateRect(Wnd, NULL, TRUE);
 }
 
 // This function will add another UIElement to chain for creation. As we're
@@ -436,8 +510,13 @@ UILabel::UILabel(const char* text, ETextAlign align)
 
 void UILabel::SetText(const char* text)
 {
-	Label = text;
-	if (Wnd) SetWindowText(Wnd, *Label);
+	// Avoid flicker and memory reallocation when label is not changed (useful for
+	// labels which are used as status text for some operation).
+	if (strcmp(text, *Label) != 0)
+	{
+		Label = text;
+		if (Wnd) SetWindowText(Wnd, *Label);
+	}
 }
 
 void UILabel::UpdateSize(UIBaseDialog* dialog)
@@ -462,6 +541,14 @@ static int ConvertTextAlign(ETextAlign align)
 
 void UILabel::Create(UIBaseDialog* dialog)
 {
+	if (Height == -1)
+	{
+		// Auto-size: compute label's height
+		int labelWidth, labelHeight;
+		labelWidth = Width;
+		MeasureTextVSize(*Label, &labelWidth, &labelHeight, dialog->GetWnd());
+		Height = labelHeight;
+	}
 	Parent->AllocateUISpace(X, Y, Width, Height);
 	Wnd = Window(WC_STATIC, *Label, ConvertTextAlign(Align), 0, dialog);
 	UpdateEnabled();
@@ -500,6 +587,7 @@ void UIHyperLink::Create(UIBaseDialog* dialog)
 	char buffer[MAX_TITLE_LEN];
 	appSprintf(ARRAY_ARG(buffer), "<a href=\"%s\">%s</a>", *Link, *Label);
 	Wnd = Window("SysLink", buffer, ConvertTextAlign(Align), 0, dialog);
+#endif
 	if (!Wnd)
 	{
 		// Fallback to ordinary label if SysLink was not created for some reason.
@@ -507,7 +595,6 @@ void UIHyperLink::Create(UIBaseDialog* dialog)
 		// http://stackoverflow.com/questions/1525669/set-static-text-color-win32
 		Wnd = Window(WC_STATIC, *Label, ConvertTextAlign(Align) | SS_NOTIFY, 0, dialog);
 	}
-#endif
 
 	UpdateEnabled();
 }
@@ -624,6 +711,18 @@ UIMenuButton::UIMenuButton(const char* text)
 	Height = DEFAULT_BUTTON_HEIGHT;
 }
 
+/*UIMenuButton& UIMenuButton::SetOK()
+{
+	Id = IDOK;
+	return *this;
+}
+
+UIMenuButton& UIMenuButton::SetCancel()
+{
+	Id = IDCANCEL;
+	return *this;
+}*/
+
 void UIMenuButton::Create(UIBaseDialog* dialog)
 {
 	Parent->AddVerticalSpace();
@@ -645,7 +744,7 @@ bool UIMenuButton::HandleCommand(int id, int cmd, LPARAM lParam)
 	if (cmd == BCN_DROPDOWN || (cmd == BN_CLICKED && !Callback))
 	{
 		// reference: MFC, CSplitButton::OnDropDown()
-		// create menu or ger its handle
+		// create menu or get its handle
 		HMENU hMenu = Menu->GetHandle(true, true);
 		// get rect of button for menu positioning
 		RECT rectButton;
@@ -679,7 +778,7 @@ UICheckbox::UICheckbox(const char* text, bool value, bool autoSize)
 
 UICheckbox::UICheckbox(const char* text, bool* value, bool autoSize)
 :	Label(text)
-//,	bValue(value) - uninitialized
+//,	bValue(value) - uninitialized, unused
 ,	pValue(value)
 ,	AutoSize(autoSize)
 {
@@ -823,7 +922,7 @@ UITextEdit::UITextEdit(const char* value)
 
 UITextEdit::UITextEdit(FString* value)
 :	pValue(value)
-//,	sValue(value) - uninitialized
+//,	sValue(value) - uninitialized, unused
 ,	IsMultiline(false)
 ,	IsReadOnly(false)
 ,	IsWantFocus(true)
@@ -851,12 +950,22 @@ void UITextEdit::Create(UIBaseDialog* dialog)
 	Id = dialog->GenerateDialogId();
 
 	int style = (IsWantFocus) ? WS_TABSTOP : 0;
-	if (IsMultiline) style |= WS_VSCROLL | ES_MULTILINE | ES_WANTRETURN | ES_AUTOVSCROLL;
+	if (IsMultiline)
+	{
+		style |= WS_VSCROLL | ES_MULTILINE | ES_WANTRETURN | ES_AUTOVSCROLL;
+	}
+	else
+	{
+		style |= ES_AUTOHSCROLL;
+	}
 	if (IsReadOnly)  style |= ES_READONLY;
 
 	Wnd = Window(WC_EDIT, "", style, WS_EX_CLIENTEDGE, dialog);
 	SetWindowText(Wnd, *(*pValue));
 	UpdateEnabled();
+
+	// Remove limit of 30k characters
+	SendMessage(Wnd, EM_SETLIMITTEXT, 0x100000, 0);
 }
 
 bool UITextEdit::HandleCommand(int id, int cmd, LPARAM lParam)
@@ -887,10 +996,19 @@ void UITextEdit::UpdateText()
 	TextDirty = true;
 
 	int len = GetWindowTextLength(Wnd);
-	FString& S = *pValue;
-	S.Empty(len+1);
-	S.Add(len+1);
-	GetWindowText(Wnd, &S[0], len + 1);
+	char* buf = new char[len+1];
+	GetWindowText(Wnd, buf, len + 1);
+
+	*pValue = buf;
+	delete[] buf;
+}
+
+void UITextEdit::AppendText(const char* text)
+{
+	int currLength = GetWindowTextLength(Wnd);
+	SendMessage(Wnd, EM_SETSEL, currLength, currLength);
+	SendMessage(Wnd, EM_REPLACESEL, FALSE, (LPARAM)text);
+	SendMessage(Wnd, EM_SCROLLCARET, 0, 0);
 }
 
 
@@ -937,7 +1055,7 @@ UICombobox& UICombobox::SelectItem(const char* item)
 	int index = -1;
 	for (int i = 0; i < Items.Num(); i++)
 	{
-		if (!stricmp(Items[i], item))
+		if (!stricmp(*Items[i], item))
 		{
 			index = i;
 			break;
@@ -973,7 +1091,7 @@ bool UICombobox::HandleCommand(int id, int cmd, LPARAM lParam)
 {
 	if (cmd == CBN_SELCHANGE)
 	{
-		int v = SendMessage(Wnd, CB_GETCURSEL, 0, 0);
+		int v = (int)SendMessage(Wnd, CB_GETCURSEL, 0, 0);
 		if (v != Value)
 		{
 			Value = v;
@@ -994,6 +1112,12 @@ UIListbox::UIListbox()
 :	Value(-1)
 {
 	Height = DEFAULT_LISTBOX_HEIGHT;
+}
+
+UIListbox& UIListbox::ReserveItems(int count)
+{
+	Items.ResizeTo(Items.Num() + count);
+	return *this;
 }
 
 UIListbox& UIListbox::AddItem(const char* item)
@@ -1029,7 +1153,7 @@ UIListbox& UIListbox::SelectItem(const char* item)
 	int index = -1;
 	for (int i = 0; i < Items.Num(); i++)
 	{
-		if (!stricmp(Items[i], item))
+		if (!stricmp(*Items[i], item))
 		{
 			index = i;
 			break;
@@ -1061,7 +1185,7 @@ bool UIListbox::HandleCommand(int id, int cmd, LPARAM lParam)
 {
 	if (cmd == LBN_SELCHANGE || cmd == LBN_DBLCLK)
 	{
-		int v = SendMessage(Wnd, LB_GETCURSEL, 0, 0);
+		int v = (int)SendMessage(Wnd, LB_GETCURSEL, 0, 0);
 		if (v != Value)
 		{
 			Value = v;
@@ -1108,10 +1232,13 @@ static void SetExplorerTheme(HWND Wnd)
 UIMulticolumnListbox::UIMulticolumnListbox(int numColumns)
 :	NumColumns(numColumns)
 ,	Multiselect(false)
+,	IsVirtualMode(false)
+,	SortColumn(-1)
+,	SortMode(false)
 {
 	Height = DEFAULT_LISTBOX_HEIGHT;
 	assert(NumColumns > 0 && NumColumns <= MAX_COLUMNS);
-	Items.Add(numColumns);		// reserve place for header
+	Items.AddZeroed(numColumns);	// reserve place for header
 }
 
 UIMulticolumnListbox& UIMulticolumnListbox::AddColumn(const char* title, int width, ETextAlign align)
@@ -1131,29 +1258,96 @@ UIMulticolumnListbox& UIMulticolumnListbox::AddColumn(const char* title, int wid
 	return *this;
 }
 
+void UIMulticolumnListbox::UpdateListViewHeaderSort()
+{
+	HWND hHeader = ListView_GetHeader(Wnd);
+	if (hHeader)
+	{
+		for (int i = 0; i < NumColumns; i++)
+		{
+			HDITEM hItem;
+			hItem.mask = HDI_FORMAT;
+			if (Header_GetItem(hHeader, i, &hItem))
+			{
+				if (i == SortColumn)
+				{
+					// sorting with this column
+					if (SortMode)
+						hItem.fmt = (hItem.fmt & ~HDF_SORTUP) | HDF_SORTDOWN;
+					else
+						hItem.fmt = (hItem.fmt & ~HDF_SORTDOWN) | HDF_SORTUP;
+				}
+				else
+				{
+					// not sorting with this column
+					hItem.fmt = hItem.fmt & ~(HDF_SORTDOWN|HDF_SORTUP);
+				}
+				Header_SetItem(hHeader, i, &hItem);
+			}
+		}
+	}
+}
+
+UIMulticolumnListbox& UIMulticolumnListbox::ShowSortArrow(int columnIndex, bool reverseSort)
+{
+	if ((SortColumn != columnIndex) || (SortMode != reverseSort))
+	{
+		SortColumn = columnIndex;
+		SortMode = reverseSort;
+		if (Wnd)
+		{
+			UpdateListViewHeaderSort();
+		}
+	}
+	return *this;
+}
+
+UIMulticolumnListbox& UIMulticolumnListbox::ReserveItems(int count)
+{
+	Items.ResizeTo((GetItemCount() + count + 1) * NumColumns);
+	return *this;
+}
+
 int UIMulticolumnListbox::AddItem(const char* item)
 {
 	guard(UIMulticolumnListbox::AddItem);
 
 	assert(Items.Num() % NumColumns == 0);
-	int numItems = Items.Num() / NumColumns - 1;
-	int index = Items.Add(NumColumns);
+	int numItems = GetItemCount();
+	int index = Items.AddZeroed(NumColumns);
 	Items[index] = item;
 
 	if (Wnd)
 	{
-		LVITEM lvi;
-		lvi.mask = LVIF_TEXT | LVIF_PARAM;
-		lvi.pszText = LPSTR_TEXTCALLBACK;
-		lvi.iSubItem = 0;
-		lvi.iItem = numItems;
-		lvi.lParam = numItems;
-		ListView_InsertItem(Wnd, &lvi);
+		if (!IsVirtualMode)
+		{
+			LVITEM lvi;
+			lvi.mask = LVIF_TEXT | LVIF_PARAM;
+			lvi.pszText = LPSTR_TEXTCALLBACK;
+			lvi.iSubItem = 0;
+			lvi.iItem = numItems;
+			lvi.lParam = numItems;
+			ListView_InsertItem(Wnd, &lvi);
+		}
+		else if (!IsUpdateLocked)
+		{
+			ListView_SetItemCount(Wnd, GetItemCount());
+		}
 	}
 
 	return numItems;
 
 	unguard;
+}
+
+void UIMulticolumnListbox::UnlockUpdate()
+{
+	Super::UnlockUpdate();
+	if (IsVirtualMode)
+	{
+		// for virtual mode, update items only once
+		ListView_SetItemCount(Wnd, GetItemCount());
+	}
 }
 
 void UIMulticolumnListbox::AddSubItem(int itemIndex, int column, const char* text)
@@ -1168,13 +1362,22 @@ void UIMulticolumnListbox::AddSubItem(int itemIndex, int column, const char* tex
 	unguard;
 }
 
-const char* UIMulticolumnListbox::GetSumItem(int itemIndex, int column) const
+int UIMulticolumnListbox::GetItemCount() const
+{
+	if (!IsTrueVirtualMode())
+		return Items.Num() / NumColumns - 1;
+	int NumItems = 0;
+	OnGetItemCount(const_cast<UIMulticolumnListbox*>(this), NumItems); // callbacks has non-const "this"
+	return NumItems;
+}
+
+const char* UIMulticolumnListbox::GetSubItem(int itemIndex, int column) const
 {
 	guard(UIMulticolumnListbox::AddSubItem);
 
 	assert(column >= 0 && column < NumColumns);
 	int index = (itemIndex + 1) * NumColumns + column;
-	return Items[index];
+	return *Items[index];
 
 	unguard;
 }
@@ -1195,45 +1398,33 @@ int UIMulticolumnListbox::GetSelectionIndex(int i) const
 		const_cast<UIMulticolumnListbox*>(this)->SelectedItems.Sort(CompareInts);
 	}
 	return SelectedItems[i];
-
-/*
-	// this code works only while dialog window exists
-	if (!Wnd) return -1;		// should not happen - there's no API for selecting multiple items, so UI should exist here
-	int pos = ListView_GetNextItem(Wnd, -1, LVNI_SELECTED);
-	while (--i >= 0 && pos >= 0)
-		pos = ListView_GetNextItem(Wnd, pos, LVNI_SELECTED);
-	return pos;
-*/
 }
 
 void UIMulticolumnListbox::RemoveItem(int itemIndex)
 {
-	int numItems = Items.Num() / NumColumns;
+	int numItems = GetItemCount();
 	if (itemIndex < 0 || itemIndex >= numItems)
 		return;									// out of range
 	// remove from Items array
 	int stringIndex = (itemIndex + 1) * NumColumns;
-	Items.Remove(stringIndex, NumColumns);		// remove 1 item
+	Items.RemoveAt(stringIndex, NumColumns);	// remove 1 item
 	// remove from ListView
 	if (Wnd)
 	{
 		// remove item
-		ListView_DeleteItem(Wnd, itemIndex);
-		// renumber items - keep their lParam values correct
-		LVITEM lvi;
-		lvi.mask = LVIF_PARAM;
-		lvi.iSubItem = 0;
-		for (int i = itemIndex; i < numItems - 1; i++) // 1 item was removed, so count is smaller by 1
+		if (!IsVirtualMode)
 		{
-			lvi.iItem = i;
-			lvi.lParam = i;
-			ListView_SetItem(Wnd, &lvi);
+			ListView_DeleteItem(Wnd, itemIndex);
+		}
+		else
+		{
+			ListView_SetItemCount(Wnd, numItems - 1);
 		}
 	}
 	// remove from selection
 	// (note: when window exists, item will be removed from selection in ListView_DeleteItem -> HandleCommand chain)
 	int pos = SelectedItems.FindItem(itemIndex);
-	if (pos >= 0) SelectedItems.FastRemove(pos);
+	if (pos >= 0) SelectedItems.RemoveAtSwap(pos);
 	// renumber selected items
 	for (int i = 0; i < SelectedItems.Num(); i++)
 	{
@@ -1248,12 +1439,12 @@ void UIMulticolumnListbox::RemoveAllItems()
 	// remove items from local storage and from control
 	int numStrings = Items.Num();
 	if (numStrings > NumColumns)
-		Items.Remove(NumColumns, numStrings - NumColumns);
+		Items.RemoveAt(NumColumns, numStrings - NumColumns);
 	if (Wnd) ListView_DeleteAllItems(Wnd);
 
 	// process selection
 	int selCount = SelectedItems.Num();
-	SelectedItems.FastEmpty();
+	SelectedItems.Reset();
 	if (selCount)
 	{
 		// execute a callback about selection change
@@ -1292,8 +1483,8 @@ UIMulticolumnListbox& UIMulticolumnListbox::SelectItem(int index, bool add)
 		int value = GetSelectionIndex();
 		if (index != value)
 		{
-			SelectedItems.FastEmpty();
-			SelectedItems.AddItem(index);
+			SelectedItems.Reset();
+			SelectedItems.Add(index);
 			// perform selection for control
 			if (Wnd) SetItemSelection(index, true);
 		}
@@ -1303,7 +1494,7 @@ UIMulticolumnListbox& UIMulticolumnListbox::SelectItem(int index, bool add)
 		int pos = SelectedItems.FindItem(index);
 		if (pos < 0)
 		{
-			SelectedItems.AddItem(index);
+			SelectedItems.Add(index);
 			// perform selection for control
 			if (Wnd) SetItemSelection(index, true);
 		}
@@ -1319,7 +1510,7 @@ UIMulticolumnListbox& UIMulticolumnListbox::SelectItem(const char* item, bool ad
 	int index = 0;
 	for (int i = NumColumns; i < Items.Num(); i += NumColumns, index++)
 	{
-		if (!strcmp(Items[i], item))
+		if (!strcmp(*Items[i], item))
 			return SelectItem(index, add);
 	}
 	return *this;
@@ -1329,7 +1520,7 @@ UIMulticolumnListbox& UIMulticolumnListbox::UnselectItem(int index)
 {
 	if (Wnd) SetItemSelection(index, false);
 	int pos = SelectedItems.FindItem(index);
-	if (pos >= 0) SelectedItems.FastRemove(pos);
+	if (pos >= 0) SelectedItems.RemoveAtSwap(pos);
 	return *this;
 }
 
@@ -1338,7 +1529,7 @@ UIMulticolumnListbox& UIMulticolumnListbox::UnselectItem(const char* item)
 	int index = 0;
 	for (int i = NumColumns; i < Items.Num(); i += NumColumns, index++)
 	{
-		if (!strcmp(Items[i], item))
+		if (!strcmp(*Items[i], item))
 			return UnselectItem(index);
 	}
 	return *this;
@@ -1351,7 +1542,7 @@ UIMulticolumnListbox& UIMulticolumnListbox::UnselectAllItems()
 		for (int i = SelectedItems.Num() - 1; i >= 0; i--) // SelectedItems will be altered in HandleCommand
 			SetItemSelection(SelectedItems[i], false);
 	}
-	SelectedItems.FastEmpty();
+	SelectedItems.Reset();
 	return *this;
 }
 
@@ -1371,6 +1562,7 @@ void UIMulticolumnListbox::Create(UIBaseDialog* dialog)
 	Id = dialog->GenerateDialogId();
 
 	DWORD style = Multiselect ? 0 : LVS_SINGLESEL;
+	if (IsVirtualMode) style |= LVS_OWNERDATA;
 
 	Wnd = Window(WC_LISTVIEW, "",
 		style | LVS_REPORT | LVS_SHOWSELALWAYS | WS_VSCROLL | WS_TABSTOP,
@@ -1392,7 +1584,7 @@ void UIMulticolumnListbox::Create(UIBaseDialog* dialog)
 		if (w == -1)
 			numAutoWidthColumns++;
 		else if (w < 0)
-			w = DecodeWidth(w) * clientWidth;
+			w = int(DecodeWidth(w) * clientWidth);
 		totalWidth += w;
 	}
 	assert(totalWidth <= Width);
@@ -1410,7 +1602,7 @@ void UIMulticolumnListbox::Create(UIBaseDialog* dialog)
 		if (w == -1)
 			column.cx = autoColumnWidth;
 		else if (w < 0)
-			column.cx = DecodeWidth(w) * clientWidth;
+			column.cx = int(DecodeWidth(w) * clientWidth);
 		else
 			column.cx = w;
 		switch (ColumnAlign[i])
@@ -1423,17 +1615,26 @@ void UIMulticolumnListbox::Create(UIBaseDialog* dialog)
 		ListView_InsertColumn(Wnd, i, &column);
 	}
 
+	UpdateListViewHeaderSort();
+
 	// add items
-	int numItems = (Items.Num() / NumColumns) - 1;
-	LVITEM lvi;
-	lvi.mask = LVIF_TEXT | LVIF_PARAM;
-	lvi.pszText = LPSTR_TEXTCALLBACK;
-	lvi.iSubItem = 0;
-	for (i = 0; i < numItems; i++)
+	int numItems = GetItemCount();
+	if (!IsVirtualMode)
 	{
-		lvi.iItem = i;
-		lvi.lParam = i;
-		ListView_InsertItem(Wnd, &lvi);
+		LVITEM lvi;
+		lvi.mask = LVIF_TEXT | LVIF_PARAM;
+		lvi.pszText = LPSTR_TEXTCALLBACK;
+		lvi.iSubItem = 0;
+		for (i = 0; i < numItems; i++)
+		{
+			lvi.iItem = i;
+			lvi.lParam = i;
+			ListView_InsertItem(Wnd, &lvi);
+		}
+	}
+	else
+	{
+		ListView_SetItemCount(Wnd, numItems);
 	}
 
 	// set selection
@@ -1452,8 +1653,18 @@ bool UIMulticolumnListbox::HandleCommand(int id, int cmd, LPARAM lParam)
 		// Note: this callback is executed only when items is visualized, so we can
 		// add items in "lazy" fashion.
 		NMLVDISPINFO* plvdi = (NMLVDISPINFO*)lParam;
-		int itemIndex = (plvdi->item.lParam + 1) * NumColumns;
-		plvdi->item.pszText = const_cast<char*>(*Items[itemIndex + plvdi->item.iSubItem]);
+		int itemIndex    = plvdi->item.iItem;
+		int subItemIndex = plvdi->item.iSubItem;
+		if (!IsTrueVirtualMode())
+		{
+			plvdi->item.pszText = const_cast<char*>(*Items[(itemIndex + 1) * NumColumns + subItemIndex]);
+		}
+		else
+		{
+			const char* text = "";
+			OnGetItemText(this, text, itemIndex, subItemIndex);
+			plvdi->item.pszText = const_cast<char*>(text);
+		}
 		return true;
 	}
 
@@ -1464,19 +1675,28 @@ bool UIMulticolumnListbox::HandleCommand(int id, int cmd, LPARAM lParam)
 		{
 			if ((nmlv->uOldState ^ nmlv->uNewState) & LVIS_SELECTED)
 			{
-				int item = nmlv->lParam;
-				int pos = SelectedItems.FindItem(item);
+				int item = nmlv->iItem;
 				if (nmlv->uNewState & LVIS_SELECTED)
 				{
 					// the item could be already in selection list when we're creating control
 					// and setting selection for all SelectedItems
+					int pos = SelectedItems.FindItem(item);
 					if (pos < 0)
-						SelectedItems.AddItem(item);
+						SelectedItems.Add(item);
 				}
 				else
 				{
-					assert(pos >= 0);
-					SelectedItems.FastRemove(pos);
+					if (item != -1)
+					{
+						int pos = SelectedItems.FindItem(item);
+						assert(pos >= 0);
+						SelectedItems.RemoveAtSwap(pos);
+					}
+					else
+					{
+						// iItem == -1 means all items
+						SelectedItems.Empty();
+					}
 				}
 				// callbacks
 				if (GetSelectionCount() <= 1)
@@ -1497,6 +1717,39 @@ bool UIMulticolumnListbox::HandleCommand(int id, int cmd, LPARAM lParam)
 		return true;
 	}
 
+	if (cmd == LVN_ODSTATECHANGED && IsVirtualMode)
+	{
+		// special selection mode for selecting range of items with Shift key
+		NMLVODSTATECHANGE* state = (NMLVODSTATECHANGE*)lParam;
+		if ((state->uOldState ^ state->uNewState) & LVIS_SELECTED)
+		{
+			assert(state->uNewState & LVIS_SELECTED);	// unselection is made with LVN_ITEMCHANGED, with iItem=-1
+			SelectedItems.Empty(state->iTo - state->iFrom + 1);
+			for (int item = state->iFrom; item <= state->iTo; item++)
+				SelectedItems.Add(item);
+			// notify about selection changes (multiple values changed, so no per-item notifications)
+			if (SelChangedCallback)
+				SelChangedCallback(this);
+#if DEBUG_MULTILIST_SEL
+			PrintSelection("HandleCommand", SelectedItems);
+#endif
+		}
+		return true;
+	}
+
+	if (cmd == LVN_COLUMNCLICK)
+	{
+		NMLISTVIEW* nmlv = (NMLISTVIEW*)lParam;
+		if (nmlv->iSubItem >= 0 && nmlv->iSubItem < NumColumns && OnColumnClick)
+			OnColumnClick(this, nmlv->iSubItem);
+	}
+
+	if (cmd == LVN_ODFINDITEM && IsVirtualMode)
+	{
+		//!! TODO: search
+		return false;
+	}
+
 	if (cmd == LVN_ITEMACTIVATE)
 	{
 		if (DblClickCallback)
@@ -1512,9 +1765,11 @@ bool UIMulticolumnListbox::HandleCommand(int id, int cmd, LPARAM lParam)
 			// handle Ctrl+A
 			if (pnkd->wVKey == 'A')
 			{
-				int numItems = Items.Num() / NumColumns - 1;
+				int numItems = GetItemCount();
+				LockUpdate();
 				for (int i = 0; i < numItems; i++)
 					SetItemSelection(i, true);
+				UnlockUpdate();
 			}
 		}
 
@@ -1535,21 +1790,42 @@ struct TreeViewItem
 {
 	FString			Label;
 	TreeViewItem*	Parent;
+	TreeViewItem*	HashNext;
 	HTREEITEM		hItem;
+	bool			Checked;
 
 	TreeViewItem()
 	:	Parent(NULL)
 	,	hItem(NULL)
+	,	HashNext(NULL)
+	,	Checked(false)
 	{}
 };
+
+#define TREE_HASH_SIZE		256
+#define TREE_HASH_MASK		(TREE_HASH_SIZE-1)
+#define TREE_SEPARATOR_CHAR	'/'
+
+// NOTE: this function don't have to be a part of UITreeView - it is very generic
+/*static*/ int UITreeView::GetHash(const char* text)
+{
+	int hash = 0;
+	while (char c = *text++)
+	{
+		hash = (hash ^ 0x25) + (c & 0xDF);	// 0xDF mask will ignore character's case
+	}
+	return hash & TREE_HASH_MASK;
+}
 
 UITreeView::UITreeView()
 :	SelectedItem(NULL)
 ,	RootLabel("Root")
-,	DoUseFolderIcons(false)
+,	bUseFolderIcons(false)
+,	bUseCheckboxes(false)
 ,	ItemHeight(DEFAULT_TREE_ITEM_HEIGHT)
 {
 	Height = DEFAULT_TREEVIEW_HEIGHT;
+	HashTable = new TreeViewItem*[TREE_HASH_SIZE]; // will be initialized in RemoveAllItems()
 	// create a root item
 	RemoveAllItems();
 }
@@ -1557,7 +1833,29 @@ UITreeView::UITreeView()
 UITreeView::~UITreeView()
 {
 	for (int i = 0; i < Items.Num(); i++)
+	{
 		delete Items[i];
+	}
+	delete[] HashTable;
+}
+
+TreeViewItem* UITreeView::FindItem(const char* item)
+{
+	if (item[0] == 0)
+	{
+		// this is a root node
+		return Items[0];
+	}
+	// lookup item using hash table - it is very useful when tree has lots of items
+	int hash = GetHash(item);
+	for (TreeViewItem* tvitem = HashTable[hash]; tvitem; tvitem = tvitem->HashNext)
+	{
+		if (stricmp(*tvitem->Label, item) == 0)
+		{
+			return tvitem;
+		}
+	}
+	return NULL;
 }
 
 UITreeView& UITreeView::AddItem(const char* item)
@@ -1570,31 +1868,26 @@ UITreeView& UITreeView::AddItem(const char* item)
 	char *s, *n;
 	for (s = buffer; s && s[0]; s = n)
 	{
-		// split path
-		n = strchr(s, '/');
+		// split path: find a separator and replace it with null
+		n = strchr(s, TREE_SEPARATOR_CHAR);
 		if (n) *n = 0;
 		// find this item
-		bool found = false;
-		TreeViewItem* curr;
-		for (int i = 0; i < Items.Num(); i++)
-		{
-			curr = Items[i];
-			if (!strcmp(*curr->Label, buffer))
-			{
-				found = true;
-				break;
-			}
-		}
-		if (!found)
+		TreeViewItem* curr = FindItem(buffer);
+		if (!curr)
 		{
 			curr = new TreeViewItem;
-			curr->Label = buffer;		// names are "a", "a/b", "a/b/c" etc
+			curr->Label = buffer;		// names consists of full path, i.e. they are "a", "a/b", "a/b/c" etc
 			curr->Parent = parent;
-			Items.AddItem(curr);
+			// insert into hash table
+			int hash = GetHash(buffer);
+			curr->HashNext = HashTable[hash];
+			HashTable[hash] = curr;
+			// finish creation
+			Items.Add(curr);
 			CreateItem(*curr);
 		}
-		// return '/' back and skip it
-		if (n) *n++ = '/';
+		// restore string (return separator back) and skip separator
+		if (n) *n++ = TREE_SEPARATOR_CHAR;
 		parent = curr;
 	}
 
@@ -1604,29 +1897,60 @@ UITreeView& UITreeView::AddItem(const char* item)
 // Note: this function will create "root" item
 void UITreeView::RemoveAllItems()
 {
+	// Remove currently allocated items
 	for (int i = 0; i < Items.Num(); i++)
+	{
 		delete Items[i];
+	}
 	Items.Empty();
+	memset(HashTable, 0, TREE_HASH_SIZE * sizeof(TreeViewItem*));
+
 	if (Wnd) TreeView_DeleteAllItems(Wnd);
 	// add root item, at index 0
 	TreeViewItem* root = new TreeViewItem;
 	root->Label = "";
-	Items.AddItem(root);
+	Items.Add(root);
 	SelectedItem = root;
+}
+
+void UITreeView::SetChecked(const char* item, bool checked)
+{
+	TreeViewItem* foundItem = FindItem(item);
+	if (foundItem && (foundItem->Checked != checked))
+	{
+		foundItem->Checked = checked;
+		if (Wnd)
+		{
+			TV_ITEM tvi;
+			tvi.mask = TVIF_HANDLE | TVIF_STATE;
+			tvi.hItem = foundItem->hItem;
+			tvi.stateMask = TVIS_STATEIMAGEMASK;
+			tvi.state = checked ? 2 << 12 : 1 << 12;
+			TreeView_SetItem(Wnd, &tvi);
+		}
+	}
+}
+
+bool UITreeView::GetChecked(const char* item)
+{
+	TreeViewItem* foundItem = FindItem(item);
+
+	if (!foundItem)
+		return false;
+
+	if (Wnd == NULL)
+		return foundItem->Checked;
+
+	TV_ITEM tvi;
+	tvi.mask = TVIF_HANDLE | TVIF_STATE;
+	tvi.hItem = foundItem->hItem;
+	TreeView_GetItem(Wnd, &tvi);
+	return (tvi.state >> 12) > 1;
 }
 
 UITreeView& UITreeView::SelectItem(const char* item)
 {
-	TreeViewItem* foundItem = NULL;
-	for (int i = 0; i < Items.Num(); i++)
-	{
-		if (!stricmp(Items[i]->Label, item))
-		{
-			foundItem = Items[i];
-			break;
-		}
-	}
-
+	TreeViewItem* foundItem = FindItem(item);
 	if (foundItem && foundItem != SelectedItem)
 	{
 		SelectedItem = foundItem;
@@ -1672,6 +1996,13 @@ void UITreeView::Create(UIBaseDialog* dialog)
 	Wnd = Window(WC_TREEVIEW, "",
 		TVS_HASLINES | TVS_HASBUTTONS | TVS_SHOWSELALWAYS | WS_VSCROLL | WS_TABSTOP,
 		WS_EX_CLIENTEDGE, dialog);
+	if (bUseCheckboxes)
+	{
+		// Can't set TVS_CHECKBOXES immediately - this will not allow to change "checked" state of items after creation.
+		// The known workaround is to set this style separately.
+		DWORD style = GetWindowLong(Wnd, GWL_STYLE);
+		SetWindowLong(Wnd, GWL_STYLE, style | TVS_CHECKBOXES);
+	}
 
 #if USE_EXPLORER_STYLE
 	SetExplorerTheme(Wnd);
@@ -1680,7 +2011,7 @@ void UITreeView::Create(UIBaseDialog* dialog)
 	if (ItemHeight > 0)
 		TreeView_SetItemHeight(Wnd, ItemHeight);
 
-	if (DoUseFolderIcons)
+	if (bUseFolderIcons)
 	{
 		LoadFolderIcons();
 		// Attach image lists to tree view common control
@@ -1739,7 +2070,7 @@ void UITreeView::CreateItem(TreeViewItem& item)
 	else
 	{
 		text = *item.Label;
-		const char* s = strrchr(*item.Label, '/');
+		const char* s = strrchr(*item.Label, TREE_SEPARATOR_CHAR);
 		if (s) text = s+1;
 	}
 
@@ -1747,11 +2078,18 @@ void UITreeView::CreateItem(TreeViewItem& item)
 	tvis.item.mask = TVIF_TEXT;
 	tvis.item.pszText = const_cast<char*>(text);
 
-	if (DoUseFolderIcons)
+	if (bUseFolderIcons)
 	{
 		tvis.item.mask |= TVIF_IMAGE | TVIF_SELECTEDIMAGE;
 //		tvis.item.iImage = 0;
 		tvis.item.iSelectedImage = 1;
+	}
+
+	if (bUseCheckboxes)
+	{
+		tvis.item.mask |= TVIF_STATE;
+		tvis.item.stateMask = TVIS_STATEIMAGEMASK;
+		tvis.item.state = item.Checked ? 2 << 12 : 1 << 12;
 	}
 
 	item.hItem = TreeView_InsertItem(Wnd, &tvis);
@@ -1762,6 +2100,71 @@ void UITreeView::CreateItem(TreeViewItem& item)
 		if (item.Parent == root || item.Parent->Parent == root)
 			TreeView_Expand(Wnd, item.Parent->hItem, TVE_EXPAND);
 	}
+}
+
+void UITreeView::Expand(const char* item)
+{
+	TreeViewItem* foundItem = FindItem(item);
+	if (foundItem)
+	{
+		TreeView_Expand(Wnd, foundItem->hItem, TVE_EXPAND);
+	}
+}
+
+void UITreeView::CollapseAll()
+{
+	LockUpdate();
+	for (int i = 0; i < Items.Num(); i++)
+	{
+		TreeView_Expand(Wnd, Items[i]->hItem, TVE_COLLAPSE);
+	}
+	UnlockUpdate();
+}
+
+void UITreeView::ExpandCheckedNodes()
+{
+	CollapseAll();
+	UpdateCheckedStates();
+
+	LockUpdate();
+
+	for (int i = 0; i < Items.Num(); i++)
+	{
+		TreeViewItem* item = Items[i];
+		if (item->Checked)
+		{
+			for (TreeViewItem* p = item->Parent; p; p = p->Parent)
+			{
+				TreeView_Expand(Wnd, p->hItem, TVE_EXPAND);
+			}
+		}
+	}
+
+	UnlockUpdate();
+}
+
+void UITreeView::UpdateCheckedStates()
+{
+	if (bUseCheckboxes && (Wnd != NULL))
+	{
+		// Update checkbox states
+		for (int i = 0; i < Items.Num(); i++)
+		{
+			TreeViewItem* item = Items[i];
+			TV_ITEM tvi;
+			tvi.mask = TVIF_HANDLE | TVIF_STATE;
+			tvi.hItem = item->hItem;
+			TreeView_GetItem(Wnd, &tvi);
+			item->Checked = (tvi.state >> 12) > 1;
+		}
+	}
+}
+
+void UITreeView::DialogClosed(bool cancel)
+{
+	UpdateCheckedStates();
+	// Some marker indicating that window is no longer valid
+	Wnd = NULL;
 }
 
 
@@ -1947,7 +2350,7 @@ void UIMenuItem::FillMenuItems(HMENU parentMenu, int& nextId, int& position)
 				mii.fState     = fState;
 				mii.wID        = item->Id;
 				mii.dwTypeData = const_cast<char*>(*item->Label);
-				mii.cch        = strlen(mii.dwTypeData);
+				mii.cch        = (UINT)strlen(mii.dwTypeData);
 
 				InsertMenuItem(parentMenu, position, TRUE, &mii);
 			}
@@ -2295,12 +2698,12 @@ void UIGroup::AllocateUISpace(int& x, int& y, int& w, int& h)
 		if (w == -1 && (Flags & GROUP_HORIZONTAL_LAYOUT))
 			w = AutoWidth;
 		else
-			w = DecodeWidth(w) * parentWidth;
+			w = int(DecodeWidth(w) * parentWidth);
 	}
 
 	if (h < 0 && Height > 0)
 	{
-		h = DecodeWidth(h) * Height;
+		h = int(DecodeWidth(h) * Height);
 	}
 	assert(h >= 0);
 
@@ -2311,22 +2714,22 @@ void UIGroup::AllocateUISpace(int& x, int& y, int& w, int& h)
 			CursorX += w;
 	}
 	else if (x < 0)
-		x = baseX + DecodeWidth(x) * parentWidth;	// left border of parent control, 'x' is relative value
+		x = baseX + int(DecodeWidth(x) * parentWidth);	// left border of parent control, 'x' is relative value
 	else
-		x = baseX + x;								// treat 'x' as relative value
+		x = baseX + x;									// treat 'x' as relative value
 
 	if (x + w > rightMargin)
 		w = rightMargin - x;
 
 	if (y < 0)
 	{
-		y = Y + CursorY;							// next 'y' value
+		y = Y + CursorY;								// next 'y' value
 		if ((Flags & (GROUP_NO_AUTO_LAYOUT|GROUP_HORIZONTAL_LAYOUT)) == 0)
 			CursorY += h;
 	}
 	else
 	{
-		y = Y + CursorY + y;						// treat 'y' as relative value
+		y = Y + CursorY + y;							// treat 'y' as relative value
 		// don't change 'Height'
 	}
 
@@ -2386,6 +2789,11 @@ void UIGroup::ShowAllControls(bool show)
 void UIGroup::Create(UIBaseDialog* dialog)
 {
 	CreateGroupControls(dialog);
+	// Disable all children controls if this UIGroup is disabled
+	if (!Enabled)
+	{
+		EnableAllControls(Enabled);
+	}
 }
 
 void UIGroup::UpdateEnabled()
@@ -2437,6 +2845,10 @@ void UIGroup::CreateGroupControls(UIBaseDialog* dialog)
 	// allow UIGroup-based classes to add own controls
 	AddCustomControls();
 
+	// some controls could compite size depending on text
+	for (UIElement* control = FirstChild; control; control = control->NextChild)
+		control->UpdateSize(dialog);
+
 	// determine default width of control in horizontal layout; this value will be used for
 	// all controls which width was not specified (for Width==-1)
 	AutoWidth = 0;
@@ -2453,24 +2865,31 @@ void UIGroup::CreateGroupControls(UIBaseDialog* dialog)
 		for (UIElement* control = FirstChild; control; control = control->NextChild)
 		{
 			numControls++;
-			// some controls could compite size depending on text
-			control->UpdateSize(dialog);
 			// get width of control
 			int w = control->Width;
 			if (w == -1)
+			{
 				numAutoWidthControls++;
+			}
 			else if (w < 0)
-				w = DecodeWidth(w) * parentWidth;
-			totalWidth += w;
+			{
+				w = int(DecodeWidth(w) * parentWidth);
+				totalWidth += w;
+			}
+			else
+			{
+				totalWidth += w;
+			}
 		}
-		assert(totalWidth <= parentWidth);
+		if (totalWidth > parentWidth)
+			appNotify("Group(%s) is not wide enough to store children controls: %d < %d", *Label, parentWidth, totalWidth);
 		if (numAutoWidthControls)
 			AutoWidth = (parentWidth - totalWidth) / numAutoWidthControls;
 		if (Flags & GROUP_HORIZONTAL_SPACING)
 		{
 			if (numAutoWidthControls)
 			{
-				appNotify("Group(%s) has GROUP_HORIZONTAL_SPACING and auto-width controls");
+				appNotify("Group(%s) has GROUP_HORIZONTAL_SPACING and auto-width controls", *Label);
 			}
 			else
 			{
@@ -2482,7 +2901,7 @@ void UIGroup::CreateGroupControls(UIBaseDialog* dialog)
 
 	// call 'Create' for all children
 	int maxControlY = Y + Height;
-	bool isRadioGroup;
+	bool isRadioGroup = false;
 	int controlIndex = 0;
 	for (UIElement* control = FirstChild; control; control = control->NextChild, controlIndex++)
 	{
@@ -2583,7 +3002,16 @@ void UIGroup::RadioButtonClicked(UIRadioButton* sender)
 UICheckboxGroup::UICheckboxGroup(const char* label, bool value, unsigned flags)
 :	UIGroup(flags)
 ,	Label(label)
-,	Value(value)
+,	bValue(value)
+,	pValue(&bValue)		// points to local variable
+,	CheckboxWnd(0)
+{}
+
+UICheckboxGroup::UICheckboxGroup(const char* label, bool* value, unsigned flags)
+:	UIGroup(flags)
+,	Label(label)
+//,	bValue(value) - uninitialized, unused
+,	pValue(value)
 ,	CheckboxWnd(0)
 {}
 
@@ -2602,8 +3030,8 @@ void UICheckboxGroup::Create(UIBaseDialog* dialog)
 	CheckboxWnd = Window(WC_BUTTON, *Label, WS_TABSTOP | BS_AUTOCHECKBOX, 0, dialog,
 		Id, X + checkboxOffset, Y, min(checkboxWidth + DEFAULT_CHECKBOX_HEIGHT, Width - checkboxOffset), DEFAULT_CHECKBOX_HEIGHT);
 
-	CheckDlgButton(DlgWnd, Id, Value ? BST_CHECKED : BST_UNCHECKED);
-	EnableAllControls(Value);
+	CheckDlgButton(DlgWnd, Id, *pValue ? BST_CHECKED : BST_UNCHECKED);
+	EnableAllControls(*pValue);
 }
 
 bool UICheckboxGroup::HandleCommand(int id, int cmd, LPARAM lParam)
@@ -2614,10 +3042,10 @@ bool UICheckboxGroup::HandleCommand(int id, int cmd, LPARAM lParam)
 		if (cmd != BN_CLICKED) return false;
 
 		bool checked = (IsDlgButtonChecked(DlgWnd, Id) != BST_UNCHECKED);
-		if (Value != checked)
+		if (*pValue != checked)
 		{
-			Value = checked;
-			EnableAllControls(Value);
+			*pValue = checked;
+			EnableAllControls(*pValue);
 			if (Callback)
 				Callback(this, checked);
 			return true;
@@ -2688,9 +3116,10 @@ void UIPageControl::Create(UIBaseDialog* dialog)
 UIBaseDialog::UIBaseDialog()
 :	UIGroup(GROUP_NO_BORDER)
 ,	NextDialogId(FIRST_DIALOG_ID)
-,	DoCloseOnEsc(false)
+,	ShouldCloseOnEsc(false)
 ,	ParentDialog(NULL)
 ,	IconResId(0)
+,	IsDialogConstructed(false)
 {}
 
 UIBaseDialog::~UIBaseDialog()
@@ -2756,7 +3185,7 @@ static DLGTEMPLATE* MakeDialogTemplate(int width, int height, const wchar_t* tit
 	dlg1->cx = width;
 	dlg1->cy = height;
 
-	int titleLen = wcslen(title);
+	int titleLen = (int)wcslen(title);
 	assert(titleLen < MAX_TITLE_LEN);
 	wcscpy(dlg1->title, title);
 
@@ -2794,16 +3223,26 @@ bool UIBaseDialog::ShowDialog(bool modal, const char* title, int width, int heig
 		// modal
 		ParentDialog = GCurrentDialog;
 		GCurrentDialog = this;
-		int result = DialogBoxIndirectParam(
-			hInstance,					// hInstance
-			tmpl,						// lpTemplate
-			ParentWindow,				// hWndParent
-			StaticWndProc,				// lpDialogFunc
-			(LPARAM)this				// lParamInit
-		);
-		GCurrentDialog = ParentDialog;
-		ParentDialog = NULL;
-		return (result != IDCANCEL);
+#if DO_GUARD
+		TRY {
+#endif
+			INT_PTR result = DialogBoxIndirectParam(
+				hInstance,				// hInstance
+				tmpl,					// lpTemplate
+				ParentWindow,			// hWndParent
+				StaticWndProc,			// lpDialogFunc
+				(LPARAM)this			// lParamInit
+			);
+			GCurrentDialog = ParentDialog;
+			ParentDialog = NULL;
+			return (result != IDCANCEL);
+#if DO_GUARD
+		} CATCH_CRASH {
+			GCurrentDialog = ParentDialog;
+			ParentDialog = NULL;
+			THROW;
+		}
+#endif // DO_GUARD
 	}
 	else
 	{
@@ -2834,7 +3273,7 @@ bool UIBaseDialog::PumpMessageLoop()
 	MSG msg;
 	while (PeekMessage(&msg, NULL, 0, 0, PM_REMOVE))
 	{
-		if (msg.message == WM_KEYDOWN && DoCloseOnEsc && msg.wParam == VK_ESCAPE)
+		if (msg.message == WM_KEYDOWN && ShouldCloseOnEsc && msg.wParam == VK_ESCAPE)
 		{
 			// Win32 dialog boxes doesn't receive keyboard messages. By the way, modal boxes receives IDOK
 			// or IDCANCEL commands when user press 'Enter' or 'Escape'. In order to handle the 'Escape' key
@@ -2862,20 +3301,23 @@ bool UIBaseDialog::PumpMessageLoop()
 
 void UIBaseDialog::CloseDialog(bool cancel)
 {
-	if (!Wnd) return;
-	DialogClosed(cancel);
-	EndDialog(Wnd, cancel ? IDCANCEL : IDOK);
-	Wnd = 0;
+	if (Wnd && CanCloseDialog(cancel))
+	{
+		DialogClosed(cancel);
+		EndDialog(Wnd, cancel ? IDCANCEL : IDOK);
+		Wnd = 0;
+	}
+}
+
+static void (*GUIExceptionHandler)() = NULL;
+
+void UISetExceptionHandler(void (*Handler)())
+{
+	GUIExceptionHandler = Handler;
 }
 
 INT_PTR CALLBACK UIBaseDialog::StaticWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
-#if DO_GUARD
-	// windows will not allow us to pass SEH through the message handler, so
-	// add a SEH guards here
-	TRY {
-#endif
-
 	UIBaseDialog* dlg;
 
 	if (msg == WM_INITDIALOG)
@@ -2890,21 +3332,31 @@ INT_PTR CALLBACK UIBaseDialog::StaticWndProc(HWND hWnd, UINT msg, WPARAM wParam,
 		dlg = (UIBaseDialog*)GetWindowLongPtr(hWnd, GWLP_USERDATA);
 	}
 
+#if !DO_GUARD
 	return dlg->WndProc(hWnd, msg, wParam, lParam);
-
-#if DO_GUARD
+#else
+	// windows will not allow us to pass SEH through the message handler, so
+	// add a SEH guards here
+	TRY {
+		return dlg->WndProc(hWnd, msg, wParam, lParam);
 	} CATCH_CRASH {
+#if MAX_DEBUG
+		// sometimes when working with debugger, exception inside UI could not be passed outside,
+		// and program crashed bypassing out exception handler - always show error information in
+		// MAX_DEBUG mode
 		if (GErrorHistory[0])
 		{
-//			appPrintf("ERROR: %s\n", GErrorHistory);
 			appNotify("ERROR in WindowProc: %s\n", GErrorHistory);
 		}
 		else
 		{
-//			appPrintf("Unknown error\n");
-			appNotify("Unknown error\n");
+			appNotify("Unknown error in WindowProc\n");
 		}
-		exit(1);
+#endif // MAX_DEBUG
+//		dlg->CloseDialog(true);
+		if (GUIExceptionHandler)
+			GUIExceptionHandler();
+		THROW;
 	}
 #endif
 }
@@ -2938,7 +3390,9 @@ INT_PTR UIBaseDialog::WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
 		// release old controls, if dialog is opened 2nd time
 		ReleaseControls();
 		// create controls
+		IsDialogConstructed = false;
 		InitUI();
+		IsDialogConstructed = true;
 		CreateGroupControls(this);
 
 		if (Menu)

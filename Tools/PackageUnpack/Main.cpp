@@ -20,6 +20,21 @@ static void CopyStream(FArchive *Src, FILE *Dst, int Count)
 	}
 }
 
+#if UNREAL4
+
+int UE4UnversionedPackage(int verMin, int verMax)
+{
+	appError("Unversioned UE4 packages are not supported. Please restart UModel and select UE4 version in range %d-%d using UI or command line.", verMin, verMax);
+	return -1;
+}
+
+bool UE4EncryptedPak()
+{
+	return false;
+}
+
+#endif // UNREAL4
+
 
 /*-----------------------------------------------------------------------------
 	Main function
@@ -171,10 +186,25 @@ int main(int argc, char **argv)
 		// read header (raw)
 		int compressedStart   = Summary.CompressedChunks[0].CompressedOffset;
 		int uncompressedStart = Summary.CompressedChunks[0].UncompressedOffset;
-		FILE *h = fopen(Package->Filename, "rb");
+
+		// use game file system to access file to avoid any troubles with locating file
+		const CGameFileInfo* info = appFindGameFile(Package->Filename);
+		FArchive* h;
+		if (info)
+		{
+			// if file was loaded using search inside game path, use game filesystem, because
+			// direct use of package name may not work
+			h = appCreateFileReader(info);
+		}
+		else
+		{
+			// if file for some reason was not registered, open it using file name
+			h = new FFileReader(argPkgName);
+		}
+		assert(h);
 		byte *buffer = new byte[compressedStart];
-		fread(buffer, compressedStart, 1, h);
-		fclose(h);
+		h->Serialize(buffer, compressedStart);
+		delete h;
 
 		FMemReader mem(buffer, compressedStart);
 		mem.SetupFrom(*Package);
@@ -185,16 +215,17 @@ int main(int argc, char **argv)
 		// find package flags
 		found = false;
 		const FString &Group = Summary.PackageGroup;
+		int DataArrayLen = Group.GetDataArray().Num();
 		for (pos = 8; pos < 48; pos++)
 		{
 			mem.Seek(pos);
 			int tmp;
 			mem << tmp;
-			if (tmp != Group.Num() && tmp != -Group.Num()) continue;	// ANSI or Unicode string (MassEffect3 has unicode here)
+			if (tmp != DataArrayLen && tmp != -DataArrayLen) continue;	// ANSI or Unicode string (MassEffect3 has unicode here)
 			mem.Seek(pos);
 			FString tmp2;
 			mem << tmp2;
-			if (strcmp(tmp2, *Group) != 0) continue;
+			if (strcmp(*tmp2, *Group) != 0) continue;
 			int flagsPos = mem.Tell();
 			mem << tmp;
 			if (tmp != Summary.PackageFlags) continue;
@@ -244,6 +275,10 @@ int main(int argc, char **argv)
 		if (Package->Game == GAME_Bulletstorm)
 			cut = Summary.CompressedChunks.Num() * 20;
 #endif
+#if MKVSDC
+		if (Package->Game == GAME_MK && Package->ArVer >= 677) // MK X
+			cut = Summary.CompressedChunks.Num() * 24;
+#endif
 		int dstPos = pos + 8;	// skip CompressionFlags and CompressedChunks.Num
 		int srcPos = pos + 8 + cut;	// skip CompressedChunks
 		memcpy(buffer + dstPos, buffer + srcPos, compressedStart - srcPos);
@@ -255,7 +290,7 @@ int main(int argc, char **argv)
 		if (fwrite(buffer, uncompressedStart, 1, out) != 1) appError("Write failed");
 		delete buffer;
 
-		// copy data
+		// copy remaining data
 		Package->Seek(uncompressedStart);
 		CopyStream(Package, out, uncompressedSize - uncompressedStart);
 	}

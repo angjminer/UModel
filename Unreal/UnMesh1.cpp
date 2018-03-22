@@ -18,11 +18,11 @@ struct FMeshVertDeus
 	{
 		struct
 		{
-			int X:16; int Y:16; short Z:16; short Pad:16;
+			int X:16; int Y:16; int Z:16; int Pad:16;
 		};
 		struct
 		{
-			unsigned D1; unsigned D2;
+			uint32 D1; uint32 D2;
 		};
 	};
 
@@ -50,7 +50,7 @@ SIMPLE_TYPE(FMeshVertDeus, unsigned)
 // UE1 FMeshWedge
 struct FMeshWedge1
 {
-	word			iVertex;
+	uint16			iVertex;
 	FMeshUV1		TexUV;
 
 	operator FMeshWedge() const
@@ -104,11 +104,11 @@ void ULodMesh::SerializeLodMesh1(FArchive &Ar, TArray<FMeshAnimSeq> &AnimSeqs, T
 	unsigned						tmpAndFlags, tmpOrFlags;
 	int								tmpCurPoly, tmpCurVertex;
 	// ULodMesh fields
-	TArray<word>					tmpCollapsePointThus;
+	TArray<uint16>					tmpCollapsePointThus;
 	TArray<FMeshWedge1>				tmpWedges;
 	TArray<FMeshFace>				tmpSpecialFaces;
 	int								tmpModelVerts, tmpSpecialVerts;
-	TArray<word>					tmpRemapAnimVerts;
+	TArray<uint16>					tmpRemapAnimVerts;
 	int								tmpOldFrameVerts;
 
 	const char *realClassName = GetRealClassName();
@@ -211,7 +211,7 @@ void ULodMesh::SerializeLodMesh1(FArchive &Ar, TArray<FMeshAnimSeq> &AnimSeqs, T
 		{
 			guard(RemapVerts);
 			TArray<FMeshVert> NewVerts;
-			NewVerts.Add(FrameCount * VertexCount);
+			NewVerts.AddZeroed(FrameCount * VertexCount);
 			for (int j = 0; j < FrameCount; j++)
 			{
 				int base    = VertexCount * j;
@@ -314,8 +314,8 @@ void UMeshAnimation::Upgrade()
 
 struct VBoneInfluence1						// Weight and vertex number
 {
-	word			PointIndex;
-	word			BoneWeight;				// 0..63363 == 0..1
+	uint16			PointIndex;
+	uint16			BoneWeight;				// 0..63363 == 0..1
 
 	friend FArchive& operator<<(FArchive &Ar, VBoneInfluence1 &V)
 	{
@@ -323,14 +323,14 @@ struct VBoneInfluence1						// Weight and vertex number
 	}
 };
 
-SIMPLE_TYPE(VBoneInfluence1, word)
+SIMPLE_TYPE(VBoneInfluence1, uint16)
 
 struct VBoneInfIndex
 {
-	word			WeightIndex;
-	word			Number;
-	word			DetailA;
-	word			DetailB;
+	uint16			WeightIndex;
+	uint16			Number;
+	uint16			DetailA;
+	uint16			DetailB;
 
 	friend FArchive& operator<<(FArchive &Ar, VBoneInfIndex &V)
 	{
@@ -338,7 +338,7 @@ struct VBoneInfIndex
 	}
 };
 
-SIMPLE_TYPE(VBoneInfIndex, word)
+SIMPLE_TYPE(VBoneInfIndex, uint16)
 
 
 void USkeletalMesh::SerializeSkelMesh1(FArchive &Ar)
@@ -373,7 +373,7 @@ void USkeletalMesh::SerializeSkelMesh1(FArchive &Ar)
 	guard(Influences);
 	int numInfluences = tmpBoneWeights.Num();
 	VertInfluences.Empty(numInfluences);
-	VertInfluences.Add(numInfluences);
+	VertInfluences.AddZeroed(numInfluences);
 	int vIndex = 0;
 	assert(tmpBoneWeightIdx.Num() == RefSkeleton.Num());
 	for (int bone = 0; bone < tmpBoneWeightIdx.Num(); bone++) // loop by bones

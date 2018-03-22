@@ -9,6 +9,22 @@
 #define HOMEPAGE		"http://www.gildor.org/"
 
 
+#if UNREAL4
+
+int UE4UnversionedPackage(int verMin, int verMax)
+{
+	appError("Unversioned UE4 packages are not supported. Please restart UModel and select UE4 version in range %d-%d using UI or command line.", verMin, verMax);
+	return -1;
+}
+
+bool UE4EncryptedPak()
+{
+	return false;
+}
+
+#endif // UNREAL4
+
+
 /*-----------------------------------------------------------------------------
 	Service functions
 -----------------------------------------------------------------------------*/
@@ -51,7 +67,7 @@ static bool FilterClass(const char *ClassName)	//?? check logic: filter = pass o
 	bool filter = false;
 	for (int fidx = 0; fidx < filters.Num(); fidx++)
 	{
-		if (!stricmp(filters[fidx], ClassName))
+		if (!stricmp(*filters[fidx], ClassName))
 			return true;
 	}
 	return false;

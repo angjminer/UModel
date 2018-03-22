@@ -12,26 +12,17 @@ UIStartupDialog::UIStartupDialog(UmodelSettings& settings)
 
 bool UIStartupDialog::Show()
 {
-	if (!ShowModal("Umodel Startup Options", 320, 200))
+	if (!ShowModal("Umodel Startup Options", 360, 200))
 		return false;
 
 	// process some options
 
 	// GameOverride
 	Opt.GameOverride = GAME_UNKNOWN;
-	if (OverrideGameGroup->IsChecked() && (OverrideGameCombo->GetSelectionIndex() >= 0))
+	int selectedGame = OverrideGameCombo->GetSelectionIndex();
+	if (OverrideGameGroup->IsChecked() && (selectedGame >= 0))
 	{
-		const char* gameName = OverrideGameCombo->GetSelectionText();
-		for (int i = 0; /* empty */; i++)
-		{
-			const GameInfo &info = GListOfGames[i];
-			if (!info.Name) break;
-			if (!strcmp(info.Name, gameName))
-			{
-				Opt.GameOverride = info.Enum;
-				break;
-			}
-		}
+		Opt.GameOverride = SelectedGameEnums[selectedGame];
 	}
 
 	return true;
@@ -68,12 +59,10 @@ void UIStartupDialog::InitUI()
 	// fill engines list
 	int i;
 	const char* lastEngine = NULL;
-	const GameInfo* selectedGame = NULL;
 	for (i = 0; /* empty */; i++)
 	{
 		const GameInfo &info = GListOfGames[i];
-		if (!info.Name) break;
-		if (info.Enum == Opt.GameOverride) selectedGame = &info;
+		if (!info.Name) break;		// end of list marker
 		const char* engine = GetEngineName(info.Enum);
 		if (engine != lastEngine)
 		{
@@ -83,17 +72,14 @@ void UIStartupDialog::InitUI()
 	}
 
 	// select a game passed through the command line
-	if (selectedGame)
+	if (Opt.GameOverride != GAME_UNKNOWN)
 	{
-		OverrideEngineCombo->SelectItem(GetEngineName(selectedGame->Enum));
+		OverrideEngineCombo->SelectItem(GetEngineName(Opt.GameOverride));
 		FillGameList();
-		OverrideGameCombo->SelectItem(selectedGame->Name);
+		int gameIndex = SelectedGameEnums.FindItem(Opt.GameOverride);
+		if (gameIndex >= 0)
+			OverrideGameCombo->SelectItem(gameIndex);
 	}
-
-#if 0
-	OverrideEngineCombo->SelectItem("Unreal engine 3"); // this engine has most number of game titles
-	FillGameList();
-#endif
 
 	NewControl(UIGroup, "Engine classes to load", GROUP_HORIZONTAL_LAYOUT)
 	.SetParent(this)
@@ -121,7 +107,7 @@ void UIStartupDialog::InitUI()
 		NewControl(UIGroup, GROUP_HORIZONTAL_LAYOUT|GROUP_NO_BORDER)
 		[
 			NewControl(UIGroup, "Package compression", GROUP_HORIZONTAL_LAYOUT|GROUP_HORIZONTAL_SPACING)
-			.SetWidth(EncodeWidth(0.4f))
+			.SetWidth(EncodeWidth(0.35f))
 			.SetRadioVariable(&Opt.PackageCompression)
 			[
 				NewControl(UIRadioButton, "Auto", 0)
@@ -138,6 +124,7 @@ void UIStartupDialog::InitUI()
 				+ NewControl(UIRadioButton, "XBox360", PLATFORM_XBOX360)
 				+ NewControl(UIRadioButton, "PS3", PLATFORM_PS3)
 				+ NewControl(UIRadioButton, "iOS", PLATFORM_IOS)
+				+ NewControl(UIRadioButton, "Android", PLATFORM_ANDROID)
 			]
 		]
 	];
@@ -164,9 +151,9 @@ void UIStartupDialog::InitUI()
 	unguard;
 }
 
-static int CompareStrings(const char** a, const char** b)
+static int CompareGames(const GameInfo* const* a, const GameInfo* const* b)
 {
-	return stricmp(*a, *b);
+	return stricmp((*a)->Name, (*b)->Name);
 }
 
 // Fill list of game titles made with selected engine
@@ -175,7 +162,10 @@ void UIStartupDialog::FillGameList()
 	OverrideGameCombo->RemoveAllItems();
 	const char* selectedEngine = OverrideEngineCombo->GetSelectionText();
 
-	TArray<const char*> gameNames;
+	TArray<const GameInfo*> SelectedGameInfos;
+	SelectedGameInfos.Empty(128);
+	SelectedGameEnums.Empty(128);
+
 	int numEngineEntries = 0;
 	int i;
 
@@ -186,18 +176,36 @@ void UIStartupDialog::FillGameList()
 		const char* engine = GetEngineName(info.Enum);
 		if (!strcmp(engine, selectedEngine))
 		{
-			gameNames.AddItem(info.Name);
 			if (!strnicmp(info.Name, "Unreal engine ", 14))
 				numEngineEntries++;
+			SelectedGameInfos.Add(&info);
 		}
 	}
-	if (gameNames.Num() > numEngineEntries + 1)
+	if (SelectedGameInfos.Num() > numEngineEntries + 1)
 	{
 		// sort items, keep 1st numEngineEntries items (engine name) in place
-		QSort(&gameNames[numEngineEntries], gameNames.Num() - numEngineEntries, CompareStrings);
+		QSort<const GameInfo*>(&SelectedGameInfos[numEngineEntries], SelectedGameInfos.Num() - numEngineEntries, CompareGames);
 	}
-	for (i = 0; i < gameNames.Num(); i++)
-		OverrideGameCombo->AddItem(gameNames[i]);
+
+	for (i = 0; i < SelectedGameInfos.Num(); i++)
+	{
+#if UNREAL4
+		if (i == 0 && !stricmp(selectedEngine, "Unreal engine 4"))
+		{
+			// Special case for UE4 - we should generate engine names and enums
+			for (int ue4ver = 0; ue4ver <= LATEST_SUPPORTED_UE4_VERSION; ue4ver++)
+			{
+				char buf[128];
+				appSprintf(ARRAY_ARG(buf), "Unreal engine 4.%d", ue4ver);
+				OverrideGameCombo->AddItem(buf);
+				SelectedGameEnums.Add(GAME_UE4(ue4ver));
+			}
+			continue;
+		}
+#endif // UNREAL4
+		OverrideGameCombo->AddItem(SelectedGameInfos[i]->Name);
+		SelectedGameEnums.Add(SelectedGameInfos[i]->Enum);
+	}
 
 	// select engine item
 	OverrideGameCombo->SelectItem(0);

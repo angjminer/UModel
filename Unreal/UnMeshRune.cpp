@@ -33,7 +33,7 @@ SIMPLE_TYPE(RVertex, int)
 
 struct RTriangle
 {
-	short			vIndex[3];				// Vertex indices
+	int16			vIndex[3];				// Vertex indices
 	FMeshUV1		tex[3];					// Texture UV coordinates
 	byte			polygroup;				// polygroup this tri belongs to
 
@@ -127,7 +127,7 @@ SIMPLE_TYPE(RJointState, float)
 
 struct RAnimFrame
 {
-	short			sequenceID;				// Sequence this frame belongs to
+	int16			sequenceID;				// Sequence this frame belongs to
 	FName			event;					// Event to call during this frame
 	FBox			bounds;					// Bounding box of frame
 	TArray<RJointState> jointanim;			// O(numjoints) only used for preprocess (transient)
@@ -167,7 +167,7 @@ static void ConvertRuneAnimations(UMeshAnimation &Anim, const TArray<RJoint> &Bo
 {
 	guard(ConvertRuneAnimations);
 
-	int i, j, k;
+	int i, j;
 	int numBones = Bones.Num();
 	// create RefBones
 	Anim.RefBones.Empty(Bones.Num());
@@ -221,7 +221,7 @@ static void ConvertRuneAnimations(UMeshAnimation &Anim, const TArray<RJoint> &Bo
 				rot.Set(0, 0, 0);
 
 				byte f = *data++;
-				short d;
+				int16 d;
 #define GET		d = data[0] + (data[1] << 8); data += 2;
 #define GETF(v)	{ GET; v = (float)d / 256.0f; }
 #define GETI(v)	{ GET; v = d; }
@@ -239,8 +239,8 @@ static void ConvertRuneAnimations(UMeshAnimation &Anim, const TArray<RJoint> &Bo
 #undef GET
 #undef GETF
 #undef GETI
-				A.KeyQuat.AddItem(EulerToQuat(rot));
-				A.KeyPos.AddItem(pos);
+				A.KeyQuat.Add(EulerToQuat(rot));
+				A.KeyPos.Add(pos);
 				//?? notify about scale!=(1,1,1)
 			}
 		}
@@ -258,7 +258,7 @@ static void BuildSkeleton(TArray<CCoords> &Coords, const TArray<RJoint> &Bones, 
 
 	int numBones = Anim.Num();
 	Coords.Empty(numBones);
-	Coords.Add(numBones);
+	Coords.AddZeroed(numBones);
 
 	for (int i = 0; i < numBones; i++)
 	{
@@ -324,7 +324,7 @@ void USkelModel::Serialize(FArchive &Ar)
 		char nameBuf[256];
 		appSprintf(ARRAY_ARG(nameBuf), "%s_%d", Name, modelIdx);
 		const char *name = appStrdupPool(nameBuf);
-		Meshes.AddItem(sm);
+		Meshes.Add(sm);
 		// setup UOnject
 		sm->Name         = name;
 		sm->Package      = Package;
@@ -354,9 +354,9 @@ void USkelModel::Serialize(FArchive &Ar)
 		USkeletalMesh *sm = Meshes[modelIdx];
 		sm->Animation = Anim;
 		// setup ULodMesh
-		sm->RotOrigin.Set(0, 16384, -16384);
+		sm->RotOrigin = RotOffset;
 		sm->MeshScale.Set(1, 1, 1);
-		sm->MeshOrigin.Set(0, 0, 0);
+		sm->MeshOrigin = PosOffset;
 		// copy skeleton
 		sm->RefSkeleton.Empty(joints.Num());
 		for (i = 0; i < joints.Num(); i++)
@@ -434,7 +434,7 @@ void USkelModel::Serialize(FArchive &Ar)
 			if (strcmp(texName, "None") == 0)
 			{
 				// texture should be set from script
-				sm->Textures.AddItem(NULL);
+				sm->Textures.Add(NULL);
 				continue;
 			}
 			// find texture in object's package
@@ -447,7 +447,7 @@ void USkelModel::Serialize(FArchive &Ar)
 			}
 			// load and remember texture
 			UMaterial *Tex = static_cast<UMaterial*>(Package->CreateExport(texExportIdx));
-			sm->Textures.AddItem(Tex);
+			sm->Textures.Add(Tex);
 		}
 		// setup UPrimitive properties using 1st animation frame
 		// note: this->BoundingBox and this->BoundingSphere are null
@@ -472,11 +472,23 @@ void USkelModel::Serialize(FArchive &Ar)
 
 USkelModel::~USkelModel()
 {
-	// free holded data
+	// Release holded data.
+	// Note: children meshes are stored in GObjObjects array, so these meshes could be released separately
+	// from parent USkelModel. Se we should be careful releasing generated children models.
 	int i;
 	for (i = 0; i < Meshes.Num(); i++)
-		delete Meshes[i];
-	delete Anim;
+	{
+		USkeletalMesh* m = Meshes[i];
+		// Check if this mesh were already released, i.e. pointer is not valid now.
+		if (UObject::GObjObjects.FindItem(m) >= 0)
+		{
+			delete m;
+		}
+	}
+	if (Anim && UObject::GObjObjects.FindItem(Anim) >= 0)
+	{
+		delete Anim;
+	}
 }
 
 

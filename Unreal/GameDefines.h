@@ -30,6 +30,7 @@
 #define AA2				1		// America's Army 2
 #define VANGUARD		1		// Vanguard: Saga of Heroes
 #define LEAD			1		// UbiSoft LEAD Engine (Splinter Cell: Conviction)
+#define EOS				1		// Echo of Soul
 
 // UE2X
 #define UC1				1
@@ -95,9 +96,9 @@
 #define PLA				1		// Passion Leads Army
 #define BIOSHOCK3		1		// Bioshock Infinite
 #define REMEMBER_ME		1
-#define MARVEL_HEROES	1
+//#define MARVEL_HEROES	1		-- disabled: were used for custom TFC, which didn't work anyway, plus that code requires update after changes in game engine
 #define LOST_PLANET3	1
-#define XCOM_BUREAU		1		// The Bureau: XCOM Declassified
+#define XCOM			1		// The Bureau: XCOM Declassified, XCOM 2
 #define THIEF4			1		// Thief
 #define MURDERED		1		// Murdered: Soul Suspect
 #define SOV				1		// Seal of Vajra
@@ -106,7 +107,11 @@
 #define GUILTY			1		// Guilty Gear Xrd
 #define ALICE			1		// Alice: Madness Returns
 #define GIGANTIC		1
-//#define DUNDEF			1		// Dungeon Defenders - doesn't work, all export offsets are 0
+#define MMH7			1		// Might and Magic Heroes 7
+#define METRO_CONF		1		// Metro Conflict
+#define SMITE			1
+#define DUNDEF			1		// Dungeon Defenders
+#define DEVILS_THIRD	1		// Devil's Third
 //#define USE_XDK			1		// use some proprietary code for XBox360 support
 
 // Midway UE3 games -- make common define ??
@@ -115,6 +120,14 @@
 #define MKVSDC			1		// Mortal Kombat vs. DC Universe, Mortal Kombat, Injustice: Gods Among Us
 #define STRANGLE		1		// Stranglehold
 #define TNA_IMPACT		1		// TNA iMPACT!
+
+// UE4
+#define GEARS4			1		// Gears of War 4
+#define FRIDAY13		1		// Friday the 13th: The Game
+#define TEKKEN7			1		// Tekken 7
+#define LAWBREAKERS		1		// Lawbreakers
+#define PARAGON			1		// Paragon
+#define HIT				1		// Heroes of Incredible Tales
 
 #define SPECIAL_TAGS	1		// games with different PACKAGE_FILE_TAG
 

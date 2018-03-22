@@ -1,3 +1,6 @@
+#ifndef __CORE_GL_H__
+#define __CORE_GL_H__
+
 #define USE_GLSL			1			//?? move to Build.h ?
 
 #include "Win32Types.h"
@@ -24,7 +27,7 @@ struct gl_config_t
 
 extern gl_config_t gl_config;
 
-#define GL_SUPPORT(ext)	(gl_config.extensionMask & (ext))
+#define GL_SUPPORT(ext)	( (gl_config.extensionMask & (ext)) != 0 )
 
 extern bool GUseGLSL;
 
@@ -137,6 +140,13 @@ public:
 		glUniform2f(u, value1, value2);
 		return true;
 	}
+	inline bool SetUniform(const char *name, const CVec3& value) const
+	{
+		GLint u = glGetUniformLocation(PrObj, name);
+		if (u == -1) return false;
+		glUniform3fv(u, 1, value.v);
+		return true;
+	}
 	// attributes
 	inline GLint GetAttrib(const char *name) const
 	{
@@ -239,3 +249,5 @@ protected:
 };
 
 #endif // USE_GLSL
+
+#endif // __CORE_GL_H__

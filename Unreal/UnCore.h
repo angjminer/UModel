@@ -10,6 +10,7 @@
 
 
 // forward declarations
+template<typename T> class TArray;
 class FArchive;
 class UObject;
 class UnPackage;
@@ -88,13 +89,14 @@ const char *appGetRootDirectory();
 
 struct CGameFileInfo
 {
-	char		RelativeName[MAX_PACKAGE_PATH];		// relative to RootDirectory
-	const char *ShortFilename;						// without path, points to filename part of RelativeName
-	const char *Extension;							// points to extension part (excluding '.') of RelativeName
+	const char*	RelativeName;						// relative to RootDirectory
+	const char*	ShortFilename;						// without path, points to filename part of RelativeName
+	const char*	Extension;							// points to extension part (excluding '.') of RelativeName
 	CGameFileInfo* HashNext;						// used for fast search; computed from ShortFilename excluding extension
 	bool		IsPackage;
 	bool		PackageScanned;
 	int			SizeInKb;							// file size, in kilobytes
+	int			ExtraSizeInKb;						// size of additional non-package files
 	class FVirtualFileSystem* FileSystem;			// owning virtual file system (NULL for OS file system)
 	UnPackage*	Package;
 	// content information, valid when PackageScanned is true
@@ -104,26 +106,30 @@ struct CGameFileInfo
 	int			NumTextures;
 };
 
-extern int GNumGameFiles;
 extern int GNumPackageFiles;
 extern int GNumForeignFiles;
 
 // Ext = NULL -> use any package extension
-// Filename can contain extension, but should not contain path
+// Filename can contain extension, but should not contain path.
+// This function is quite fast because it uses hash tables.
 const CGameFileInfo *appFindGameFile(const char *Filename, const char *Ext = NULL);
+// This function allows wildcard use in Filename. When wildcard is used, it iterates over all
+// found files and could be relatively slow.
+void appFindGameFiles(const char *Filename, TArray<const CGameFileInfo*>& Files);
+
 const char *appSkipRootDir(const char *Filename);
 FArchive *appCreateFileReader(const CGameFileInfo *info);
 
 typedef bool (*EnumGameFilesCallback_t)(const CGameFileInfo*, void*);
 void appEnumGameFilesWorker(EnumGameFilesCallback_t, const char *Ext = NULL, void *Param = NULL);
 
-template<class T>
+template<typename T>
 FORCEINLINE void appEnumGameFiles(bool (*Callback)(const CGameFileInfo*, T&), const char* Ext, T& Param)
 {
 	appEnumGameFilesWorker((EnumGameFilesCallback_t)Callback, Ext, &Param);
 }
 
-template<class T>
+template<typename T>
 FORCEINLINE void appEnumGameFiles(bool (*Callback)(const CGameFileInfo*, T&), T& Param)
 {
 	appEnumGameFilesWorker((EnumGameFilesCallback_t)Callback, NULL, &Param);
@@ -149,57 +155,48 @@ class FName
 {
 public:
 	int			Index;
-#if UNREAL3
+#if UNREAL3 || UNREAL4
 	int			ExtraIndex;
-	bool		NameGenerated;
 #endif
 	const char	*Str;
 
 	FName()
 	:	Index(0)
 	,	Str("None")
-#if UNREAL3
+#if UNREAL3 || UNREAL4
 	,	ExtraIndex(0)
-	,	NameGenerated(false)
 #endif
 	{}
-
-#if UNREAL3
-	void AppendIndex()
-	{
-		if (NameGenerated || !ExtraIndex) return;
-		NameGenerated = true;
-		Str = appStrdupPool(va("%s_%d", Str, ExtraIndex-1));
-	}
-#endif // UNREAL3
-
-#if BIOSHOCK
-	void AppendIndexBio()
-	{
-		if (NameGenerated || !ExtraIndex) return;
-		NameGenerated = true;
-		Str = appStrdupPool(va("%s%d", Str, ExtraIndex-1));	// without "_" char
-	}
-#endif // BIOSHOCK
 
 	inline FName& operator=(const FName &Other)
 	{
 		Index = Other.Index;
-		Str   = Other.Str;
-#if UNREAL3
-		NameGenerated = Other.NameGenerated;
-		if (Other.NameGenerated)
-		{
-			// should duplicate generated names to avoid crash in destructor
-			Str = appStrdupPool(Other.Str);
-		}
+#if UNREAL3 || UNREAL4
+		ExtraIndex = Other.ExtraIndex;
 #endif // UNREAL3
+		Str = Other.Str;
+		return *this;
+	}
+
+	inline FName& operator=(const char* String)
+	{
+		Str = appStrdupPool(String);
+		Index = 0;
+#if UNREAL3 || UNREAL4
+		ExtraIndex = 0;
+#endif
 		return *this;
 	}
 
 	inline bool operator==(const FName& Other) const
 	{
+		// we're using appStrdupPool for FName strings, so perhaps comparison of pointers is enough here
 		return (Str == Other.Str) || (stricmp(Str, Other.Str) == 0);
+	}
+
+	inline bool operator==(const char* String) const
+	{
+		return (stricmp(Str, String) == 0);
 	}
 
 	FORCEINLINE const char *operator*() const
@@ -229,17 +226,20 @@ public:
 
 
 /*-----------------------------------------------------------------------------
-	FArchive class
+	Some enums used to distinguish game, engine and platform
 -----------------------------------------------------------------------------*/
+
+#define GAME_UE4(x)				(GAME_UE4_BASE + (x << 4))
+#define GAME_UE4_GET_MINOR(x)	((x - GAME_UE4_BASE) >> 4)	// reverse operation for GAME_UE4(x)
 
 enum EGame
 {
 	GAME_UNKNOWN   = 0,			// should be 0
 
-	GAME_UE1       = 0x01000,
+	GAME_UE1       = 0x0100000,
 		GAME_Undying,
 
-	GAME_UE2       = 0x02000,
+	GAME_UE2       = 0x0200000,
 		GAME_UT2,
 		GAME_Pariah,
 		GAME_SplinterCell,
@@ -254,18 +254,19 @@ enum EGame
 		GAME_XIII,
 		GAME_Vanguard,
 		GAME_AA2,
+		GAME_EOS,
 
-	GAME_VENGEANCE = 0x02100,	// variant of UE2
+	GAME_VENGEANCE = 0x0210000,	// variant of UE2
 		GAME_Tribes3,
 		GAME_Swat4,				// not autodetected, overlaps with Tribes3
 		GAME_Bioshock,
 
-	GAME_LEAD      = 0x02200,
+	GAME_LEAD      = 0x0220000,
 
-	GAME_UE2X      = 0x04000,
+	GAME_UE2X      = 0x0400000,
 		GAME_UC2,
 
-	GAME_UE3       = 0x08000,
+	GAME_UE3       = 0x0800000,
 		GAME_EndWar,
 		GAME_MassEffect,
 		GAME_MassEffect2,
@@ -286,6 +287,7 @@ enum EGame
 		GAME_Batman,
 		GAME_Batman2,
 		GAME_Batman3,
+		GAME_Batman4,
 		GAME_Borderlands,
 		GAME_AA3,
 		GAME_DarkVoid,
@@ -326,6 +328,7 @@ enum EGame
 		GAME_MarvelHeroes,
 		GAME_LostPlanet3,
 		GAME_XcomB,
+		GAME_Xcom2,
 		GAME_Thief4,
 		GAME_Murdered,
 		GAME_SOV,
@@ -335,28 +338,36 @@ enum EGame
 		GAME_Alice,
 		GAME_DunDef,
 		GAME_Gigantic,
+		GAME_MetroConflict,
+		GAME_Smite,
+		GAME_DevilsThird,
 
-	GAME_MIDWAY3   = 0x08100,	// variant of UE3
+	GAME_MIDWAY3   = 0x0810000,	// variant of UE3
 		GAME_A51,
 		GAME_Wheelman,
 		GAME_MK,
 		GAME_Strangle,
 		GAME_TNA,
 
-	GAME_UE4       = 0x10000,
-		// engine versions
-		GAME_UE4_0,
-		GAME_UE4_1,
-		GAME_UE4_2,
-		GAME_UE4_3,
-		GAME_UE4_4,
-		GAME_UE4_5,
-		GAME_UE4_6,
-		GAME_UE4_7,
-		// games
+	GAME_UE4_BASE  = 0x1000000,
+		// bytes: 01.00.0N.NX : 01=UE4, 00=masked by GAME_ENGINE, NN=UE4 subversion, X=game (4 bits, 0=base engine)
+		// Add custom UE4 game engines here
+		// 4.8
+		GAME_HIT = GAME_UE4(8)+1,
+		// 4.12
+		GAME_Gears4 = GAME_UE4(12)+1,
+		// 4.13
+		GAME_Lawbreakers = GAME_UE4(13)+1,
+		// 4.14
+		GAME_Friday13 = GAME_UE4(14)+1,
+		GAME_Tekken7 = GAME_UE4(14)+2,
+		// 4.19
+		GAME_Paragon = GAME_UE4(19)+1,
 
-	GAME_ENGINE    = 0xFFF00	// mask for game engine
+	GAME_ENGINE    = 0xFFF0000	// mask for game engine
 };
+
+#define LATEST_SUPPORTED_UE4_VERSION		19		// UE4.XX
 
 enum EPlatform
 {
@@ -365,10 +376,15 @@ enum EPlatform
 	PLATFORM_XBOX360,
 	PLATFORM_PS3,
 	PLATFORM_IOS,
+	PLATFORM_ANDROID,
 
 	PLATFORM_COUNT,
 };
 
+
+/*-----------------------------------------------------------------------------
+	FArchive class
+-----------------------------------------------------------------------------*/
 
 class FArchive
 {
@@ -424,6 +440,13 @@ public:
 		return false;
 	}
 
+#if UNREAL4
+	virtual bool ContainsEditorData() const
+	{
+		return false;
+	}
+#endif
+
 	// Position and file size methods.
 
 	virtual void Seek(int Pos) = 0;
@@ -449,7 +472,7 @@ public:
 
 	virtual void Seek64(int64 Pos)
 	{
-		if (Pos >= (1LL << 31)) appError("Seek64 %I64X", Pos);
+		if (Pos >= (1LL << 31)) appError("%s::Seek64(0x%llX) - not implemented", GetName(), Pos);
 		Seek((int)Pos);
 	}
 
@@ -504,11 +527,11 @@ public:
 
 	// Dummy implementation of Unreal type serialization
 
-	virtual FArchive& operator<<(FName &N)
+	virtual FArchive& operator<<(FName &/*N*/)
 	{
 		return *this;
 	}
-	virtual FArchive& operator<<(UObject *&Obj)
+	virtual FArchive& operator<<(UObject *&/*Obj*/)
 	{
 		return *this;
 	}
@@ -529,15 +552,25 @@ public:
 		return StaticGetName();
 	}
 
-	virtual bool IsA(const char* type)
+	virtual bool IsA(const char* type) const
 	{
 		return !strcmp(type, "FArchive");
 	}
 
-	template<class T> T* CastTo()
+	template<typename T>
+	T* CastTo()
 	{
 		if (IsA(T::StaticGetName()))
 			return static_cast<T*>(this);
+		else
+			return NULL;
+	}
+
+	template<typename T>
+	const T* CastTo() const
+	{
+		if (IsA(T::StaticGetName()))
+			return static_cast<const T*>(this);
 		else
 			return NULL;
 	}
@@ -555,7 +588,7 @@ public:									\
 	{									\
 		return StaticGetName();			\
 	}									\
-	virtual bool IsA(const char* type)	\
+	virtual bool IsA(const char* type) const \
 	{									\
 		return !strcmp(type, StaticGetName()) || Super::IsA(type); \
 	}									\
@@ -565,37 +598,37 @@ private:
 // Booleans in UE are serialized as int32
 FORCEINLINE FArchive& operator<<(FArchive &Ar, bool &B)
 {
-	int b32 = B;
+	int32 b32 = B;
 	Ar.Serialize(&b32, 4);
 	if (Ar.IsLoading) B = (b32 != 0);
 	return Ar;
 }
-FORCEINLINE FArchive& operator<<(FArchive &Ar, char &B)
+FORCEINLINE FArchive& operator<<(FArchive &Ar, char &B) // int8
 {
 	Ar.Serialize(&B, 1);
 	return Ar;
 }
-FORCEINLINE FArchive& operator<<(FArchive &Ar, byte &B)
+FORCEINLINE FArchive& operator<<(FArchive &Ar, byte &B) // uint8
 {
 	Ar.Serialize(&B, 1);
 	return Ar;
 }
-FORCEINLINE FArchive& operator<<(FArchive &Ar, short &B)
+FORCEINLINE FArchive& operator<<(FArchive &Ar, int16 &B)
 {
 	Ar.ByteOrderSerialize(&B, 2);
 	return Ar;
 }
-FORCEINLINE FArchive& operator<<(FArchive &Ar, word &B)
+FORCEINLINE FArchive& operator<<(FArchive &Ar, uint16 &B)
 {
 	Ar.ByteOrderSerialize(&B, 2);
 	return Ar;
 }
-FORCEINLINE FArchive& operator<<(FArchive &Ar, int &B)
+FORCEINLINE FArchive& operator<<(FArchive &Ar, int32 &B)
 {
 	Ar.ByteOrderSerialize(&B, 4);
 	return Ar;
 }
-FORCEINLINE FArchive& operator<<(FArchive &Ar, unsigned &B)
+FORCEINLINE FArchive& operator<<(FArchive &Ar, uint32 &B)
 {
 	Ar.ByteOrderSerialize(&B, 4);
 	return Ar;
@@ -644,7 +677,7 @@ public:
 protected:
 	FILE		*f;
 	unsigned	Options;
-	const char	*FullName;		// allocared with appStrdup
+	const char	*FullName;		// allocated with appStrdup
 	const char	*ShortName;		// points to FullName[N]
 	int64		FileSize;
 
@@ -695,6 +728,8 @@ public:
 	virtual void Close();
 	virtual int64 GetFileSize64() const;
 
+	static void CleanupOnError();
+
 protected:
 	void FlushBuffer();
 };
@@ -731,6 +766,10 @@ public:
 	virtual int GetFileSize() const
 	{
 		return Reader->GetFileSize() - ArPosOffset;
+	}
+	virtual void Serialize(void *data, int size)
+	{
+		Reader->Serialize(data, size);
 	}
 	virtual void SetStopper(int Pos)
 	{
@@ -808,8 +847,9 @@ protected:
 	Ar.Seek(Ar.GetStopper());
 
 // research helper
-inline void DUMP_ARC_BYTES(FArchive &Ar, int NumBytes)
+inline void DUMP_ARC_BYTES(FArchive &Ar, int NumBytes, const char* Label = NULL)
 {
+	if (Label) appPrintf("%s:", Label);
 	int64 OldPos = Ar.Tell64();
 	for (int i = 0; i < NumBytes; i++)
 	{
@@ -1070,7 +1110,69 @@ struct FBoxSphereBounds
 };
 
 
+struct FPackedNormal
+{
+	uint32	Data;
+
+	friend FArchive& operator<<(FArchive &Ar, FPackedNormal &N)
+	{
+		return Ar << N.Data;
+	}
+
+	operator FVector() const
+	{
+		// "x / 127.5 - 1" comes from Common.usf, TangentBias() macro
+		FVector r;
+		r.X = ( Data        & 0xFF) / 127.5f - 1;
+		r.Y = ((Data >> 8 ) & 0xFF) / 127.5f - 1;
+		r.Z = ((Data >> 16) & 0xFF) / 127.5f - 1;
+		return r;
+	}
+
+	FPackedNormal &operator=(const FVector &V)
+	{
+		Data = int((V.X + 1) * 127.5f)
+			+ (int((V.Y + 1) * 127.5f) << 8)
+			+ (int((V.Z + 1) * 127.5f) << 16);
+		return *this;
+	}
+
+	float GetW() const
+	{
+		return (Data >> 24) / 127.5f - 1;
+	}
+};
+
+
 #if UNREAL4
+
+// Packed normal replacement, used since UE4.12 for high-precision reflections
+struct FPackedRGBA16N
+{
+	uint16	X, Y, Z, W;
+
+	FPackedNormal ToPackedNormal() const
+	{
+		FPackedNormal r;
+		FVector v = *this;		// conversion
+		r = v;					// conversion
+		return r;
+	}
+
+	operator FVector() const
+	{
+		FVector r;
+		r.X = (X - 32767.5f) / 32767.5f;
+		r.Y = (Y - 32767.5f) / 32767.5f;
+		r.Z = (Z - 32767.5f) / 32767.5f;
+		return r;
+	}
+
+	friend FArchive& operator<<(FArchive &Ar, FPackedRGBA16N &V)
+	{
+		return Ar << V.X << V.Y << V.Z << V.W;
+	}
+};
 
 struct FIntPoint
 {
@@ -1089,6 +1191,16 @@ struct FIntVector
 	friend FArchive& operator<<(FArchive &Ar, FIntVector &V)
 	{
 		return Ar << V.X << V.Y << V.Z;
+	}
+};
+
+struct FVector2D
+{
+	float	X, Y;
+
+	friend FArchive& operator<<(FArchive &Ar, FVector2D &V)
+	{
+		return Ar << V.X << V.Y;
 	}
 };
 
@@ -1112,22 +1224,25 @@ struct FTransform
 -----------------------------------------------------------------------------*/
 
 // Default typeinfo
-template<class T> struct TTypeInfo
+template<typename T>
+struct TTypeInfo
 {
 	enum { FieldSize = sizeof(T) };
 	enum { NumFields = 1         };
 	enum { IsSimpleType = 0      };		// type consists of NumFields fields of integral type, sizeof(type) == FieldSize
-	enum { IsRawType = 0         };		// type memory layour is the same as archive layout
+	enum { IsRawType = 0         };		// type's on-disk layout exactly matches in-memory layout
 	enum { IsPod = IS_POD(T)     };		// type has no constructor/destructor
 };
 
 
-template<class T1, class T2> struct IsSameType
+template<typename T1, typename T2>
+struct TAreTypesEqual
 {
 	enum { Value = 0 };
 };
 
-template<class T> struct IsSameType<T,T>
+template<typename T>
+struct TAreTypesEqual<T,T>
 {
 	enum { Value = 1 };
 };
@@ -1176,10 +1291,10 @@ template<> struct TTypeInfo<Type>			\
 SIMPLE_TYPE(bool,     bool)
 SIMPLE_TYPE(byte,     byte)
 SIMPLE_TYPE(char,     char)
-SIMPLE_TYPE(short,    short)
-SIMPLE_TYPE(word,     word)
-SIMPLE_TYPE(int,      int)
-SIMPLE_TYPE(unsigned, unsigned)
+SIMPLE_TYPE(int16,    int16)
+SIMPLE_TYPE(uint16,   uint16)
+SIMPLE_TYPE(int32,    int32)
+SIMPLE_TYPE(uint32,   uint32)
 SIMPLE_TYPE(float,    float)
 SIMPLE_TYPE(int64,    int64)
 SIMPLE_TYPE(uint64,   uint64)
@@ -1190,25 +1305,28 @@ SIMPLE_TYPE(FVector4, float)
 SIMPLE_TYPE(FQuat,    float)
 SIMPLE_TYPE(FCoords,  float)
 SIMPLE_TYPE(FColor,   byte)
+SIMPLE_TYPE(FPackedNormal, uint32)
 
 #if UNREAL4
 
-SIMPLE_TYPE(FIntPoint, int)
+SIMPLE_TYPE(FPackedRGBA16N, uint16)
+SIMPLE_TYPE(FIntPoint,  int)
 SIMPLE_TYPE(FIntVector, int)
+SIMPLE_TYPE(FVector2D,  float)
 SIMPLE_TYPE(FTransform, float)
 
 #endif // UNREAL4
 
 
 /*-----------------------------------------------------------------------------
-	TArray/TLazyArray templates
+	TArray class
 -----------------------------------------------------------------------------*/
 
 /*
  * NOTES:
  *	- FArray/TArray should not contain objects with virtual tables (no
  *	  constructor/destructor support)
- *	- should not use new[] and delete[] here, because compiler will alloc
+ *	- should not use new[] and delete[] here, because compiler will allocate
  *	  additional 'count' field to support correct delete[], but we use
  *	  appMalloc/appFree calls to allocate/release memory.
  */
@@ -1216,6 +1334,8 @@ SIMPLE_TYPE(FTransform, float)
 class FArray
 {
 	friend struct CTypeInfo;
+	friend class FString;
+	template<int N> friend class FStaticString;
 
 public:
 	FORCEINLINE FArray()
@@ -1236,6 +1356,14 @@ public:
 	FORCEINLINE int Num() const
 	{
 		return DataCount;
+	}
+	FORCEINLINE int Max() const
+	{
+		return MaxCount;
+	}
+	FORCEINLINE bool IsValidIndex(int index) const
+	{
+		return index >= 0 && index < DataCount;
 	}
 
 	void RawCopy(const FArray &Src, int elementSize);
@@ -1259,13 +1387,18 @@ protected:
 	// serializers
 	FArchive& Serialize(FArchive &Ar, void (*Serializer)(FArchive&, void*), int elementSize);
 
-	void Empty (int count, int elementSize);
-	void Add   (int count, int elementSize);
-	void Insert(int index, int count, int elementSize);
+	// clear array and resize to specific count
+	void Empty(int count, int elementSize);
+	// reserve space for 'count' items
+	void GrowArray(int count, int elementSize);
+	// insert 'count' items of size 'elementSize' at position 'index', memory will be zeroed
+	void InsertZeroed(int index, int count, int elementSize);
+	// insert 'count' items of size 'elementSize' at position 'index', memory will be uninitialized
+	void InsertUninitialized(int index, int count, int elementSize);
 	// remove items and then move next items to the position of removed items
 	void Remove(int index, int count, int elementSize);
-	// remove items and then fill the hole with items from array end
-	void FastRemove(int index, int count, int elementSize);
+	// remove items and then fill the hole with items from array's end
+	void RemoveAtSwap(int index, int count, int elementSize);
 
 	void* GetItem(int index, int elementSize) const;
 };
@@ -1277,14 +1410,15 @@ protected:
 
 FArchive& SerializeLazyArray(FArchive &Ar, FArray &Array, FArchive& (*Serializer)(FArchive&, void*));
 #if UNREAL3
-FArchive& SerializeRawArray(FArchive &Ar, FArray &Array, FArchive& (*Serializer)(FArchive&, void*));
+FArchive& SerializeBulkArray(FArchive &Ar, FArray &Array, FArchive& (*Serializer)(FArchive&, void*));
 #endif
 
 
 // NOTE: this container cannot hold objects, required constructor/destructor
 // (at least, Add/Insert/Remove functions are not supported, but can serialize
 // such data)
-template<class T> class TArray : public FArray
+template<typename T>
+class TArray : public FArray
 {
 public:
 	TArray()
@@ -1297,6 +1431,14 @@ public:
 	}
 	// data accessors
 
+	FORCEINLINE T* GetData()
+	{
+		return (T*)DataPtr;
+	}
+	FORCEINLINE const T* GetData() const
+	{
+		return (const T*)DataPtr;
+	}
 #if !DO_ASSERT
 	// version without verifications, very compact
 	FORCEINLINE T& operator[](int index)
@@ -1308,20 +1450,16 @@ public:
 		return *((T*)DataPtr + index);
 	}
 #elif DO_GUARD_MAX
-	// version with guardfunc instead of guard
+	// version with __FUNCSIG__
 	T& operator[](int index)
 	{
-		guardfunc;
-		assert(index >= 0 && index < DataCount);
+		if (!IsValidIndex(index)) appError("%s: index %d is out of range (%d)", __FUNCSIG__, index, DataCount);
 		return *((T*)DataPtr + index);
-		unguardf("%d/%d", index, DataCount);
 	}
 	const T& operator[](int index) const
 	{
-		guardfunc;
-		assert(index >= 0 && index < DataCount);
+		if (!IsValidIndex(index)) appError("%s: index %d is out of range (%d)", __FUNCSIG__, index, DataCount);
 		return *((T*)DataPtr + index);
-		unguardf("%d/%d", index, DataCount);
 	}
 #else // DO_ASSERT && !DO_GUARD_MAX
 	// common implementation for all types
@@ -1333,22 +1471,97 @@ public:
 	{
 		return *(T*)GetItem(index, sizeof(T));
 	}
-#endif
+#endif // DO_ASSERT && !DO_GUARD_MAX
 
-	FORCEINLINE int Add(int count = 1)
+	FORCEINLINE T& Last(int IndexFromEnd = 0)
+	{
+		return *(T*)GetItem(DataCount - IndexFromEnd - 1, sizeof(T));
+	}
+
+	FORCEINLINE const T& Last(int IndexFromEnd = 0) const
+	{
+		return *(T*)GetItem(DataCount - IndexFromEnd - 1, sizeof(T));
+	}
+
+	//!! Possible additions from UE4:
+	//!! Emplace(...)       = new(...)
+	//!! SetNum/SetNumUninitialized/SetNumZeroed
+
+	FORCEINLINE void Init(const T& value, int count)
+	{
+		Empty(count);
+		DataCount = count;
+		for (int i = 0; i < count; i++)
+			*((T*)DataPtr + i) = value;
+	}
+
+	FORCEINLINE int Add(const T& item)
 	{
 		int index = DataCount;
-		Insert(index, count);
+		FArray::InsertUninitialized(index, 1, sizeof(T));
+		new ((T*)DataPtr + index) T(item);
 		return index;
 	}
-
-	FORCEINLINE void Insert(int index, int count = 1)
+	FORCEINLINE int AddZeroed(int count = 1)
 	{
-		FArray::Insert(index, count, sizeof(T));
-		if (!TTypeInfo<T>::IsPod) Construct(index, count);
+		int index = DataCount;
+		FArray::InsertZeroed(index, count, sizeof(T));
+		return index;
+	}
+	FORCEINLINE int AddDefaulted(int count = 1)
+	{
+		int index = DataCount;
+		if (!TTypeInfo<T>::IsPod)
+		{
+			FArray::InsertUninitialized(index, count, sizeof(T));
+			Construct(index, count);
+		}
+		else
+		{
+			FArray::InsertZeroed(index, count, sizeof(T));
+		}
+		return index;
+	}
+	FORCEINLINE int AddUninitialized(int count = 1)
+	{
+		int index = DataCount;
+		FArray::InsertUninitialized(index, count, sizeof(T));
+		return index;
+	}
+	FORCEINLINE int AddUnique(const T& item)
+	{
+		int index = FindItem(item);
+		if (index >= 0) return index;
+		return Add(item);
 	}
 
-	FORCEINLINE void Remove(int index, int count = 1)
+	FORCEINLINE void Insert(const T& item, int index)
+	{
+		FArray::InsertUninitialized(index, 1, sizeof(T));
+		new ((T*)DataPtr + index) T(item);
+	}
+	FORCEINLINE void InsertZeroed(int index, int count = 1)
+	{
+		FArray::InsertZeroed(index, count, sizeof(T));
+	}
+	FORCEINLINE void InsertDefaulted(int index, int count = 1)
+	{
+		if (!TTypeInfo<T>::IsPod)
+		{
+			FArray::InsertUninitialized(index, count, sizeof(T));
+			Construct(index, count);
+		}
+		else
+		{
+			FArray::InsertZeroed(index, count, sizeof(T));
+		}
+	}
+	FORCEINLINE void InsertUninitialized(int index, int count = 1)
+	{
+		FArray::InsertUninitialized(index, count, sizeof(T));
+	}
+
+	FORCEINLINE void RemoveAt(int index, int count = 1)
 	{
 		// destruct specified array items
 		if (!TTypeInfo<T>::IsPod) Destruct(index, count);
@@ -1359,25 +1572,19 @@ public:
 	// Remove an item and copy last array's item(s) to the removed item position,
 	// so no array shifting performed. Could be used when order of array elements
 	// is not important.
-	FORCEINLINE void FastRemove(int index, int count = 1)
+	FORCEINLINE void RemoveAtSwap(int index, int count = 1)
 	{
 		// destruct specified array items
 		if (!TTypeInfo<T>::IsPod) Destruct(index, count);
 		// remove items from array
-		FArray::FastRemove(index, count, sizeof(T));
+		FArray::RemoveAtSwap(index, count, sizeof(T));
 	}
 
-	int AddItem(const T& item)
+	FORCEINLINE void RemoveSingle(const T& item)
 	{
-		int index = Add();
-		Item(index) = item;
-		return index;
-	}
-
-	FORCEINLINE T& AddItem()
-	{
-		int index = Add();
-		return Item(index);
+		int index = FindItem(item);
+		if (index >= 0)
+			RemoveAt(index);
 	}
 
 	int FindItem(const T& item, int startIndex = 0) const
@@ -1404,12 +1611,32 @@ public:
 		FArray::Empty(count, sizeof(T));
 	}
 
-	FORCEINLINE void FastEmpty()
+	FORCEINLINE void ResizeTo(int count)
 	{
-		// destruct all array items
-		if (!TTypeInfo<T>::IsPod) Destruct(0, DataCount);
-		// set DataCount to 0 without reallocation
-		DataCount = 0;
+		if (count > DataCount)
+		{
+			// grow array
+			FArray::GrowArray(count - DataCount, sizeof(T));
+		}
+		else if (count < DataCount)
+		{
+			// shrink array
+			RemoveAt(count, DataCount - count);
+		}
+	}
+
+	// set new DataCount without reallocation if possible
+	FORCEINLINE void Reset(int count = 0)
+	{
+		if (MaxCount < count)
+		{
+			Empty(count);
+		}
+		else
+		{
+			if (!TTypeInfo<T>::IsPod) Destruct(0, DataCount);
+			DataCount = 0;
+		}
 	}
 
 	FORCEINLINE void Sort(int (*cmpFunc)(const T*, const T*))
@@ -1444,6 +1671,24 @@ public:
 #endif
 	}
 
+#if UNREAL3
+	// Serialize an array, which file contents exactly matches in-memory contents.
+	// Whole array can be read using a single read call. Package engine version should
+	// equals to game engine version, and endianness should match, otherwise per-element
+	// reading will be performed (as usual in TArray). Implemented in UE3 and UE4.
+	// Note: there is no reading optimization performed here (in umodel).
+	FORCEINLINE void BulkSerialize(FArchive& Ar)
+	{
+	#if DO_GUARD_MAX
+		guardfunc;
+	#endif
+		SerializeBulkArray(Ar, *this, SerializeArray);
+	#if DO_GUARD_MAX
+		unguard;
+	#endif
+	}
+#endif // UNREAL3
+
 	// serializer helper; used from 'operator<<(FArchive, TArray<>)' only
 	static void SerializeItem(FArchive &Ar, void *item)
 	{
@@ -1452,14 +1697,40 @@ public:
 		Ar << *(T*)item;		// serialize item
 	}
 
-private:
+	// serializer which allows passing custom function: function should have
+	// prototype 'void Func(FArchive& Ar, T& Obj)'
+	typedef void (*SerializerFunc_t)(FArchive& Ar, T& Obj);
+
+	template<SerializerFunc_t F>
+	FArchive& Serialize2(FArchive& Ar)
+	{
+		if (!TTypeInfo<T>::IsPod && Ar.IsLoading)
+			Destruct(0, Num());
+		return FArray::Serialize(Ar, TArray<T>::SerializeItem2<F>, sizeof(T));
+	}
+
+	template<SerializerFunc_t F>
+	static void SerializeItem2(FArchive& Ar, void* item)
+	{
+		if (!TTypeInfo<T>::IsPod && Ar.IsLoading)
+			new (item) T;		// construct item before reading
+		F(Ar, *(T*) item);
+	}
+
+protected:
 	// disable array copying
 	TArray(const TArray &Other)
 	:	FArray()
 	{}
 	TArray& operator=(const TArray &Other)
 	{
-		return this;
+		return *this;
+	}
+	// Helper function to reduce TLazyArray etc operator<<'s code size.
+	// Used as C-style wrapper around TArray<>::operator<<().
+	static FArchive& SerializeArray(FArchive &Ar, void *Array)
+	{
+		return Ar << *(TArray<T>*)Array;
 	}
 	// fast version of operator[] without assertions (may be used in safe code)
 	FORCEINLINE T& Item(int index)
@@ -1482,7 +1753,8 @@ private:
 	}
 };
 
-template<class T> inline void Exchange(TArray<T>& A, TArray<T>& B)
+template<typename T>
+inline void Exchange(TArray<T>& A, TArray<T>& B)
 {
 	const int size = sizeof(TArray<T>);
 	byte buffer[size];
@@ -1491,8 +1763,11 @@ template<class T> inline void Exchange(TArray<T>& A, TArray<T>& B)
 	memcpy(&B, buffer, size);
 }
 
-// Binary-compatible array, but with no allocations inside
-template<class T, int N> class TStaticArray : public TArray<T>
+// Binary-compatible array, but with inline allocation. FArray has helper function
+// IsStatic() for this class. The array size is not limited to 'N' - if more items
+// will be required, memory will be allocated.
+template<typename T, int N>
+class TStaticArray : public TArray<T>
 {
 	// We require "using TArray<T>::*" for gcc 3.4+ compilation
 	// http://gcc.gnu.org/gcc-3.4/changes.html
@@ -1511,13 +1786,21 @@ protected:
 	T		StaticData[N];
 };
 
-template<class T> FORCEINLINE void* operator new(size_t size, TArray<T> &Array)
+#ifndef UMODEL_LIB_IN_NAMESPACE
+// Do not compile operator new when building UnCore.h inside a namespace.
+// More info: https://github.com/gildor2/UModel/pull/15/commits/3dc3096a6e81845a75024e060715b76bf345cd1b
+
+template<typename T>
+FORCEINLINE void* operator new(size_t size, TArray<T> &Array)
 {
 	guard(TArray::operator new);
-	assert(size == sizeof(T));
-	return &Array.AddItem();
+	assert(size == sizeof(T)); // allocating wrong object? can't disallow allocating of "int" inside "TArray<FString>" at compile time ...
+	int index = Array.AddUninitialized(1);
+	return Array.GetData() + index;
 	unguard;
 }
+
+#endif // UMODEL_LIB_IN_NAMESPACE
 
 
 // Skip array of items of fixed size
@@ -1530,89 +1813,34 @@ void SkipFixedArray(FArchive &Ar, int ItemSize);
 // it 1st time only disk position is remembered, and later array can be
 // read from file when needed)
 
-template<class T> class TLazyArray : public TArray<T>
+template<typename T>
+class TLazyArray : public TArray<T>
 {
-	// Helper function to reduce TLazyArray<>::operator<<() code size.
-	// Used as C-style wrapper around TArray<>::operator<<().
-	static FArchive& SerializeArray(FArchive &Ar, void *Array)
-	{
-		return Ar << *(TArray<T>*)Array;
-	}
-
 #if DO_GUARD_MAX
 	friend FArchive& operator<<(FArchive &Ar, TLazyArray &A)
 	{
 		guardfunc;
-		return SerializeLazyArray(Ar, A, SerializeArray);
+		return SerializeLazyArray(Ar, A, TArray<T>::SerializeArray);
 		unguard;
 	}
 #else
 	friend FORCEINLINE FArchive& operator<<(FArchive &Ar, TLazyArray &A)
 	{
-		return SerializeLazyArray(Ar, A, SerializeArray);
+		return SerializeLazyArray(Ar, A, TArray<T>::SerializeArray);
 	}
 #endif
 };
 
 
 void SkipLazyArray(FArchive &Ar);
-
-
 #if UNREAL3
-
-// NOTE: real class name is unknown; other suitable names: TCookedArray, TPodArray.
-// Purpose in UE: array, which file contents exactly the same as in-memory
-// contents. Whole array can be read using single read call. Package
-// engine version should equals to game engine version, otherwise per-element
-// reading will be performed (as usual in TArray)
-// There is no reading optimization performed here (in umodel)
-
-template<class T> class TRawArray : protected TArray<T>
-{
-public:
-	// Helper function to reduce TRawArray<>::operator<<() code size.
-	// Used as C-style wrapper around TArray<>::operator<<().
-	static FArchive& SerializeArray(FArchive &Ar, void *Array)
-	{
-		return Ar << *(TArray<T>*)Array;
-	}
-
-#if DO_GUARD_MAX
-	friend FArchive& operator<<(FArchive &Ar, TRawArray &A)
-	{
-		guardfunc;
-		return SerializeRawArray(Ar, A, SerializeArray);
-		unguard;
-	}
-#else
-	friend FORCEINLINE FArchive& operator<<(FArchive &Ar, TRawArray &A)
-	{
-		return SerializeRawArray(Ar, A, SerializeArray);
-	}
-#endif
-
-protected:
-	// disallow direct creation of TRawArray, this is a helper class with a
-	// different serializer
-	TRawArray()
-	{}
-};
-
-void SkipRawArray(FArchive &Ar, int Size = -1);
-
-// helper function for RAW_ARRAY macro
-template<class T> inline TRawArray<T>& ToRawArray(TArray<T> &Arr)
-{
-	return (TRawArray<T>&)Arr;
-}
-
-#define RAW_ARRAY(Arr)		ToRawArray(Arr)
-
+void SkipBulkArrayData(FArchive &Ar, int Size = -1);
 #endif // UNREAL3
 
-template<typename T1, typename T2> inline void CopyArray(TArray<T1> &Dst, const TArray<T2> &Src)
+template<typename T1, typename T2>
+inline void CopyArray(TArray<T1> &Dst, const TArray<T2> &Src)
 {
-	if (IsSameType<T1,T2>::Value && TTypeInfo<T1>::IsPod)
+	if (TAreTypesEqual<T1,T2>::Value && TTypeInfo<T1>::IsPod)
 	{
 		// fast version when copying POD type array
 		Dst.RawCopy(Src, sizeof(T1));
@@ -1624,7 +1852,7 @@ template<typename T1, typename T2> inline void CopyArray(TArray<T1> &Dst, const 
 	Dst.Empty(Count);
 	if (Count)
 	{
-		Dst.Add(Count);
+		Dst.AddUninitialized(Count);
 		T1 *pDst = (T1*)Dst.GetData();
 		T2 *pSrc = (T2*)Src.GetData();
 		do		// Count is > 0 here - checked above, so "do ... while" is more suitable (and more compact)
@@ -1640,7 +1868,8 @@ template<typename T1, typename T2> inline void CopyArray(TArray<T1> &Dst, const 
 -----------------------------------------------------------------------------*/
 
 // Very simple class, required only for serialization
-template<class TK, class TV> struct TMapPair
+template<typename TK, typename TV>
+struct TMapPair
 {
 	TK		Key;
 	TV		Value;
@@ -1652,7 +1881,8 @@ template<class TK, class TV> struct TMapPair
 };
 
 
-template<class TK, class TV> class TMap : public TArray<TMapPair<TK, TV> >
+template<typename TK, typename TV>
+class TMap : public TArray<TMapPair<TK, TV> >
 {
 public:
 	friend FORCEINLINE FArchive& operator<<(FArchive &Ar, TMap &Map)
@@ -1661,7 +1891,8 @@ public:
 	}
 };
 
-template<class TK, class TV, int N> class TStaticMap : public TStaticArray<TMapPair<TK, TV>, N>
+template<typename TK, typename TV, int N>
+class TStaticMap : public TStaticArray<TMapPair<TK, TV>, N>
 {
 public:
 	friend FORCEINLINE FArchive& operator<<(FArchive &Ar, TStaticMap &Map)
@@ -1672,72 +1903,152 @@ public:
 
 
 /*-----------------------------------------------------------------------------
+	TArray of T[N] template
+-----------------------------------------------------------------------------*/
+
+template<typename T, int N>
+struct TArrayOfArrayItem
+{
+	T	Data[N];
+
+	friend FArchive& operator<<(FArchive &Ar, TArrayOfArrayItem &S)
+	{
+		for (int i = 0; i < N; i++)
+			Ar << S.Data[i];
+		return Ar;
+	}
+};
+
+template<typename T, int N>
+class TArrayOfArray : public TArray<TArrayOfArrayItem<T, N> >
+{
+};
+
+/*-----------------------------------------------------------------------------
 	FString
 -----------------------------------------------------------------------------*/
 
-class FString : public TArray<char>
+class FString
 {
 public:
 	FString()
 	{}
 	FString(const char* src);
+	FString(const FString& Other);
 
 	FString& operator=(const char* src);
-	FORCEINLINE FString& operator=(const FString& src)
-	{
-		return operator=(*src);
-	}
+	FString& operator=(const FString& src);
 
 	FString& operator+=(const char* text);
+
+	//?? TODO: operate with arrays here
+	FORCEINLINE FString& operator+=(const FString& Str)
+	{
+		return operator+=(*Str);
+	}
 
 	// use FString as allocated char*, FString became empty and will not free
 	// detached string in destructor
 	char* Detach();
 
-	FORCEINLINE bool IsEmpty()
+	FORCEINLINE int Len() const
 	{
-		return Num() <= 1;
+		return Data.Num() <= 1 ? 0 : Data.Num() - 1;
+	}
+
+	FORCEINLINE TArray<char>& GetDataArray()
+	{
+		return Data;
+	}
+
+	FORCEINLINE const TArray<char>& GetDataArray() const
+	{
+		return Data;
+	}
+
+	FORCEINLINE void Empty(int count = 0)
+	{
+		Data.Empty(count);
+	}
+
+	FORCEINLINE bool IsEmpty() const
+	{
+		return Data.Num() <= 1;
+	}
+
+	bool StartsWith(const char* Text);
+	bool EndsWith(const char* Text);
+	bool RemoveFromStart(const char* Text);
+	bool RemoveFromEnd(const char* Text);
+
+	FString& AppendChar(char ch);
+
+	FORCEINLINE void RemoveAt(int index, int count = 1)
+	{
+		Data.RemoveAt(index, count);
+	}
+
+	char& operator[](int index)
+	{
+		guard(FString::operator[]);
+		assert(index >= 0 && index < Data.Num());
+		return Data.GetData()[index];
+		unguardf("%d/%d", index, Data.Num());
+	}
+	const char& operator[](int index) const
+	{
+		guard(FString::operator[]);
+		assert(index >= 0 && index < Data.Num());
+		return Data.GetData()[index];
+		unguardf("%d/%d", index, Data.Num());
 	}
 
 	// convert string to char* - use "*Str"
-	//!! WARNING: could crash if string is empty
 	FORCEINLINE const char *operator*() const
 	{
-		return (char*)DataPtr;
+		return IsEmpty() ? "" : Data.GetData();
 	}
-	FORCEINLINE operator const char*() const
-	{
-		return (char*)DataPtr;
-	}
+//	FORCEINLINE operator const char*() const
+//	{
+//		return IsEmpty() ? "" : Data.GetData();
+//	}
 	// comparison
-	FORCEINLINE bool operator==(const FString& other) const
+	friend FORCEINLINE bool operator==(const FString& A, const FString& B)
 	{
-		return !strcmp((char*)DataPtr, (char*)other.DataPtr);
+		return !strcmp(*A, *B);
 	}
-	FORCEINLINE bool operator==(const char* other) const
+	friend FORCEINLINE bool operator==(const char* A, const FString& B)
 	{
-		return !strcmp((char*)DataPtr, other);
+		return !strcmp(A, *B);
+	}
+	friend FORCEINLINE bool operator==(const FString& A, const char* B)
+	{
+		return !strcmp(*A, B);
 	}
 
 	friend FArchive& operator<<(FArchive &Ar, FString &S);
+
+protected:
+	TArray<char>		Data;
 };
 
 // Binary-compatible string, but with no allocations inside
-template<int N> class FStaticString : public FString
+template<int N>
+class FStaticString : public FString
 {
 public:
 	FORCEINLINE FStaticString()
 	{
-		DataPtr = (void*)&StaticData[0];
-		MaxCount = N;
+		Data.DataPtr = (void*)&StaticData[0];
+		Data.MaxCount = N;
 	}
 
 	// operators
-	FORCEINLINE FString& operator=(const char* src)
+	FORCEINLINE FStaticString& operator=(const char* src)
 	{
 		return (FStaticString&) FString::operator=(src);
 	}
-	FORCEINLINE FString& operator=(const FString& src)
+	FORCEINLINE FStaticString& operator=(const FString& src)
 	{
 		return (FStaticString&) FString::operator=(src);
 	}
@@ -1754,7 +2065,7 @@ protected:
 class FGuid
 {
 public:
-	unsigned	A, B, C, D;
+	uint32		A, B, C, D;
 
 	friend FArchive& operator<<(FArchive &Ar, FGuid &G)
 	{
@@ -1787,22 +2098,7 @@ struct FCompressedChunkBlock
 	int			CompressedSize;
 	int			UncompressedSize;
 
-	friend FArchive& operator<<(FArchive &Ar, FCompressedChunkBlock &B)
-	{
-#if UNREAL4
-		if (Ar.Game >= GAME_UE4)
-		{
-			// UE4 has 64-bit values here
-			int64 CompressedSize64, UncompressedSize64;
-			Ar << CompressedSize64 << UncompressedSize64;
-			assert((CompressedSize64 | UncompressedSize64) <= 0x7FFFFFFF); // we're using 32 bit values
-			B.CompressedSize = (int)CompressedSize64;
-			B.UncompressedSize = (int)UncompressedSize64;
-			return Ar;
-		}
-#endif // UNREAL4
-		return Ar << B.CompressedSize << B.UncompressedSize;
-	}
+	friend FArchive& operator<<(FArchive &Ar, FCompressedChunkBlock &B);
 };
 
 struct FCompressedChunkHeader
@@ -1824,7 +2120,7 @@ void appReadCompressedChunk(FArchive &Ar, byte *Buffer, int Size, int Compressio
 
 // UE3
 #define BULKDATA_StoreInSeparateFile	0x01		// bulk stored in different file
-#define BULKDATA_CompressedZlib			0x02		// unknown name
+#define BULKDATA_CompressedZlib			0x02		// name = BULKDATA_SerializeCompressedZLIB (UE4) ?
 #define BULKDATA_CompressedLzo			0x10		// unknown name
 #define BULKDATA_Unused					0x20		// empty bulk block
 #define BULKDATA_SeparateData			0x40		// unknown name - bulk stored in a different place in the same file
@@ -1838,10 +2134,11 @@ void appReadCompressedChunk(FArchive &Ar, byte *Buffer, int Size, int Compressio
 
 #if UNREAL4
 
-#define BULKDATA_PayloadAtEndOfFile		0x01		//?? bulk data stored at the end of this file
-//#define BULKDATA_CompressedZlib		0x02
-//#define BULKDATA_Unused				0x20
-#define BULKDATA_ForceInlinePayload		0x40		//?? bulk data stored immediately after header
+#define BULKDATA_PayloadAtEndOfFile		0x0001		// bulk data stored at the end of this file, data offset added to global data offset in package
+//#define BULKDATA_CompressedZlib		0x0002		// the same value as for UE3
+//#define BULKDATA_Unused				0x0020		// the same value as for UE3
+#define BULKDATA_ForceInlinePayload		0x0040		// bulk data stored immediately after header
+#define BULKDATA_PayloadInSeperateFile	0x0100		// data stored in .ubulk file near the asset (UE4.12+)
 
 #endif // UNREAL4
 
@@ -1866,12 +2163,18 @@ struct FByteBulkData //?? separate FUntypedBulkData
 
 	virtual ~FByteBulkData()
 	{
-		if (BulkData) appFree(BulkData);
+		ReleaseData();
 	}
 
 	virtual int GetElementSize() const
 	{
 		return 1;
+	}
+
+	void ReleaseData()
+	{
+		if (BulkData) appFree(BulkData);
+		BulkData = NULL;
 	}
 
 	// support functions
@@ -1910,14 +2213,32 @@ struct FIntBulkData : public FByteBulkData
 #define COMPRESS_LZX		4
 
 #if BLADENSOUL
-#define COMPRESS_LZO_ENC	8						// encrypted LZO
+#define COMPRESS_LZO_ENC_BNS	8					// encrypted LZO
+#endif
+
+#if SMITE
+#define COMPRESS_LZO_ENC_SMITE	514					// encrypted LZO
+#endif
+
+#if GEARS4
+#define COMPRESS_LZ4		0xFE					// custom umodel's constant
 #endif
 
 #define COMPRESS_FIND		0xFF					// use this flag for appDecompress when exact compression method is not known
 
-#define PKG_StoreCompressed	0x2000000
+#define PKG_StoreCompressed	 0x02000000
+#define PKG_FilterEditorOnly 0x80000000
 
 int appDecompress(byte *CompressedBuffer, int CompressedSize, byte *UncompressedBuffer, int UncompressedSize, int Flags);
+
+// UE4 has built-in AES encryption
+
+extern FString GAesKey;
+
+void appDecryptAES(byte* Data, int Size);
+
+// Callback called when encrypted pak file is attempted to load
+bool UE4EncryptedPak();
 
 
 /*-----------------------------------------------------------------------------
@@ -1926,7 +2247,7 @@ int appDecompress(byte *CompressedBuffer, int CompressedSize, byte *Uncompressed
 
 #if UNREAL4
 
-// Unreal engine 4 versions, declared as enum to be able to see all revisions in single place
+// Unreal engine 4 versions, declared as enum to be able to see all revisions in a single place
 enum
 {
 	// Pre-release UE4 file versions
@@ -1942,6 +2263,7 @@ enum
 	VER_UE4_BULKDATA_AT_LARGE_OFFSETS = 198,
 	VER_UE4_SUMMARY_HAS_BULKDATA_OFFSET = 212,
 	VER_UE4_STATIC_MESH_STORE_NAV_COLLISION = 216,
+	VER_UE4_DEPRECATED_STATIC_MESH_THUMBNAIL_PROPERTIES_REMOVED = 242,
 	VER_UE4_APEX_CLOTH = 254,
 	VER_UE4_STATIC_SKELETAL_MESH_SERIALIZATION_FIX = 269,
 	VER_UE4_SUPPORT_32BIT_STATIC_MESH_INDICES = 277,
@@ -1954,27 +2276,300 @@ enum
 	VER_UE4_FIX_ANIMATIONBASEPOSE_SERIALIZATION = 331,
 	VER_UE4_SUPPORT_8_BONE_INFLUENCES_SKELETAL_MESHES = 332,
 	VER_UE4_SUPPORT_GPUSKINNING_8_BONE_INFLUENCES = 334,
+	VER_UE4_ANIM_SUPPORT_NONUNIFORM_SCALE_ANIMATION = 335,
 	VER_UE4_ENGINE_VERSION_OBJECT = 336,
 	VER_UE4_SKELETON_GUID_SERIALIZATION = 338,
-	// UE4.0 source code released on GitHub. Note: if we don't have any VER_UE4_...
-	// values between, for instance, VER_UE4_0 and VER_UE4_1, it doesn't matter for
-	// this framework which version is serialized - 4.0 or 4.1, because 4.1 has nothing
-	// new regarding supported object formats compared to 4.0.
+	// UE4.0 source code was released on GitHub. Note: if we don't have any VER_UE4_...
+	// values between two VER_UE4_xx constants, for instance, between VER_UE4_0 and VER_UE4_1,
+	// it doesn't matter for this framework which version will be serialized serialized -
+	// 4.0 or 4.1, because 4.1 has nothing new for supported object formats compared to 4.0.
 	VER_UE4_0 = 342,
 	VER_UE4_1 = 352,
 	VER_UE4_2 = 363,
 		VER_UE4_LOAD_FOR_EDITOR_GAME = 365,
 		VER_UE4_FTEXT_HISTORY = 368,					// used for UStaticMesh versioning
+		VER_UE4_STORE_BONE_EXPORT_NAMES = 370,
 	VER_UE4_3 = 382,
 		VER_UE4_ADD_STRING_ASSET_REFERENCES_MAP = 384,
 	VER_UE4_4 = 385,
 		VER_UE4_SKELETON_ADD_SMARTNAMES = 388,
+		VER_UE4_SOUND_COMPRESSION_TYPE_ADDED = 392,
 		VER_UE4_RENAME_CROUCHMOVESCHARACTERDOWN = 394,	// used for UStaticMesh versioning
 		VER_UE4_DEPRECATE_UMG_STYLE_ASSETS = 397,		// used for UStaticMesh versioning
 	VER_UE4_5 = 401,
 	VER_UE4_6 = 413,
 		VER_UE4_RENAME_WIDGET_VISIBILITY = 416,			// used for UStaticMesh versioning
+		VER_UE4_ANIMATION_ADD_TRACKCURVES = 417,
 	VER_UE4_7 = 434,
+		VER_UE4_STRUCT_GUID_IN_PROPERTY_TAG = 441,
+		VER_UE4_PACKAGE_SUMMARY_HAS_COMPATIBLE_ENGINE_VERSION = 444,
+	VER_UE4_8 = 451,
+		VER_UE4_SERIALIZE_TEXT_IN_PACKAGES = 459,
+	VER_UE4_9 = 482,
+	VER_UE4_10 = VER_UE4_9,								// exactly the same file version for 4.9 and 4.10
+		VER_UE4_COOKED_ASSETS_IN_EDITOR_SUPPORT = 485,
+		VER_UE4_SOUND_CONCURRENCY_PACKAGE = 489,		// used for UStaticMesh versioning
+	VER_UE4_11 = 498,
+		VER_UE4_INNER_ARRAY_TAG_INFO = 500,
+		VER_UE4_PROPERTY_GUID_IN_PROPERTY_TAG = 503,
+		VER_UE4_NAME_HASHES_SERIALIZED = 504,
+	VER_UE4_12 = 504,
+	VER_UE4_13 = 505,
+		VER_UE4_PRELOAD_DEPENDENCIES_IN_COOKED_EXPORTS = 507,
+		VER_UE4_TemplateIndex_IN_COOKED_EXPORTS = 508,
+	VER_UE4_14 = 508,
+		VER_UE4_PROPERTY_TAG_SET_MAP_SUPPORT = 509,
+		VER_UE4_ADDED_SEARCHABLE_NAMES = 510,
+	VER_UE4_15 = 510,
+		VER_UE4_64BIT_EXPORTMAP_SERIALSIZES = 511,
+	VER_UE4_16 = 513,
+	VER_UE4_17 = 513,
+	VER_UE4_18 = 514,
+		VER_UE4_ADDED_PACKAGE_SUMMARY_LOCALIZATION_ID = 516,
+	VER_UE4_19 = 516,
+	// look for NEW_ENGINE_VERSION over the code to find places where version constants should be inserted.
+	// LATEST_SUPPORTED_UE4_VERSION should be updated too.
+};
+
+int GetUE4CustomVersion(const FArchive& Ar, const FGuid& Guid);
+
+struct FFrameworkObjectVersion
+{
+	enum Type
+	{
+		BeforeCustomVersionWasAdded = 0,
+		MoveCompressedAnimDataToTheDDC = 5,
+		// UE4.12 = 6
+		SmartNameRefactor = 7,
+		// UE4.13 = 12
+		RemoveSoundWaveCompressionName = 12,
+		// UE4.14 = 17
+		MoveCurveTypesToSkeleton = 15,
+		CacheDestructibleOverlaps = 16,
+		GeometryCacheMissingMaterials = 17,	// not needed now - for UGeometryCache
+		// UE4.15 = 22
+		// UE4.16 = 23
+		// UE4.17 = 28
+		// UE4.18 = 30
+
+		VersionPlusOne,
+		LatestVersion = VersionPlusOne - 1
+	};
+
+	static Type Get(const FArchive& Ar)
+	{
+		static const FGuid GUID = { 0xCFFC743F, 0x43B04480, 0x939114DF, 0x171D2073 };
+		int ver = GetUE4CustomVersion(Ar, GUID);
+		if (ver >= 0)
+			return (Type)ver;
+
+#if FRIDAY13 || TEKKEN7
+		if (Ar.Game == GAME_Friday13 || Ar.Game == GAME_Tekken7) return (Type)14;		// pre-UE4.14
+#endif
+
+		if (Ar.Game < GAME_UE4(12))
+			return BeforeCustomVersionWasAdded;
+		if (Ar.Game < GAME_UE4(13))
+			return (Type)6;
+		if (Ar.Game < GAME_UE4(14))
+			return RemoveSoundWaveCompressionName;
+		if (Ar.Game < GAME_UE4(15))
+			return GeometryCacheMissingMaterials;
+		if (Ar.Game < GAME_UE4(16))
+			return (Type)22;
+		if (Ar.Game < GAME_UE4(17))
+			return (Type)23;
+		if (Ar.Game < GAME_UE4(18))
+			return (Type)28;
+		if (Ar.Game < GAME_UE4(19))
+			return (Type)30;
+		// NEW_ENGINE_VERSION
+		return LatestVersion;
+	}
+};
+
+struct FEditorObjectVersion
+{
+	enum Type
+	{
+		BeforeCustomVersionWasAdded = 0,
+		// UE4.12 = 2
+		// UE4.13 = 6
+		// UE4.14 = 8
+		RefactorMeshEditorMaterials = 8,
+		// UE4.15 = 14
+		UPropertryForMeshSection = 10,
+		// UE4.16 = 17
+		// UE4.17, UE4.18 = 20
+
+		VersionPlusOne,
+		LatestVersion = VersionPlusOne - 1
+	};
+
+	static Type Get(const FArchive& Ar)
+	{
+		static const FGuid GUID = { 0xE4B068ED, 0xF49442E9, 0xA231DA0B, 0x2E46BB41 };
+		int ver = GetUE4CustomVersion(Ar, GUID);
+		if (ver >= 0)
+			return (Type)ver;
+
+#if FRIDAY13 || TEKKEN7
+		if (Ar.Game == GAME_Friday13 || Ar.Game == GAME_Tekken7) return (Type)7;		// pre-UE4.14
+#endif
+
+		if (Ar.Game < GAME_UE4(12))
+			return BeforeCustomVersionWasAdded;
+		if (Ar.Game < GAME_UE4(13))
+			return (Type)2;
+		if (Ar.Game < GAME_UE4(14))
+			return (Type)6;
+		if (Ar.Game < GAME_UE4(15))
+			return RefactorMeshEditorMaterials;
+		if (Ar.Game < GAME_UE4(16))
+			return (Type)14;
+		if (Ar.Game < GAME_UE4(17))
+			return (Type)17;
+		if (Ar.Game < GAME_UE4(19))		// UE4.17 and 4.18
+			return (Type)20;
+		// NEW_ENGINE_VERSION
+		return LatestVersion;
+	}
+};
+
+struct FSkeletalMeshCustomVersion
+{
+	enum Type
+	{
+		BeforeCustomVersionWasAdded = 0,
+		// UE4.13 = 4
+		CombineSectionWithChunk = 1,
+		CombineSoftAndRigidVerts = 2,
+		RecalcMaxBoneInfluences = 3,
+		SaveNumVertices = 4,
+		// UE4.14 = 5
+		UseSharedColorBufferFormat = 6,		// separate vertex stream for vertex influences
+		UseSeparateSkinWeightBuffer = 7,	// use FColorVertexStream for both static and skeletal meshes
+		// UE4.15 = 7
+		NewClothingSystemAdded = 8,
+		// UE4.16, UE4.17 = 9
+		// UE4.18 = 10
+		CompactClothVertexBuffer = 10,
+		RemoveSourceData = 11,
+		SplitModelAndRenderData = 12,
+		RemoveTriangleSorting = 13,
+		RemoveDuplicatedClothingSections = 14,
+		DeprecateSectionDisabledFlag = 16,
+
+		VersionPlusOne,
+		LatestVersion = VersionPlusOne - 1
+	};
+
+	static Type Get(const FArchive& Ar)
+	{
+		static const FGuid GUID = { 0xD78A4A00, 0xE8584697, 0xBAA819B5, 0x487D46B4 };
+		int ver = GetUE4CustomVersion(Ar, GUID);
+		if (ver >= 0)
+			return (Type)ver;
+#if PARAGON
+		if (Ar.Game == GAME_Paragon) return (Type)12;
+#endif
+
+		if (Ar.Game < GAME_UE4(13))
+			return BeforeCustomVersionWasAdded;
+		if (Ar.Game < GAME_UE4(14))
+			return SaveNumVertices;
+		if (Ar.Game < GAME_UE4(15))
+			return (Type)5;
+		if (Ar.Game < GAME_UE4(16))
+			return UseSeparateSkinWeightBuffer;
+		if (Ar.Game < GAME_UE4(18)) // 4.16 and 4.17
+			return (Type)9;
+		if (Ar.Game < GAME_UE4(19))
+			return CompactClothVertexBuffer;
+		if (Ar.Game < GAME_UE4(20))
+			return DeprecateSectionDisabledFlag;
+		// NEW_ENGINE_VERSION
+		return LatestVersion;
+	}
+};
+
+struct FRenderingObjectVersion
+{
+	enum Type
+	{
+		BeforeCustomVersionWasAdded = 0,
+		// UE4.14
+		TextureStreamingMeshUVChannelData = 10,
+		// UE4.16 = 15
+		// UE4.17 = 19
+		// UE4.18 = 20
+
+		VersionPlusOne,
+		LatestVersion = VersionPlusOne - 1
+	};
+
+	static Type Get(const FArchive& Ar)
+	{
+		static const FGuid GUID = { 0x12F88B9F, 0x88754AFC, 0xA67CD90C, 0x383ABD29 };
+		int ver = GetUE4CustomVersion(Ar, GUID);
+		if (ver >= 0)
+			return (Type)ver;
+
+#if FRIDAY13 || TEKKEN7
+		if (Ar.Game == GAME_Friday13 || Ar.Game == GAME_Tekken7) return (Type)9;		// pre-UE4.14
+#endif
+
+		if (Ar.Game < GAME_UE4(12))
+			return BeforeCustomVersionWasAdded;
+		if (Ar.Game < GAME_UE4(13))
+			return (Type)2;
+		if (Ar.Game < GAME_UE4(14))
+			return (Type)4;
+		if (Ar.Game < GAME_UE4(16))	// 4.14 and 4.15
+			return (Type)12;
+		if (Ar.Game < GAME_UE4(17))
+			return (Type)15;
+		if (Ar.Game < GAME_UE4(18))
+			return (Type)19;
+		if (Ar.Game < GAME_UE4(19))
+			return (Type)20;
+		// NEW_ENGINE_VERSION
+		return LatestVersion;
+	}
+};
+
+struct FAnimPhysObjectVersion
+{
+	enum Type
+	{
+		BeforeCustomVersionWasAdded = 0,
+		// UE4.16 = 3
+		RemoveUIDFromSmartNameSerialize = 5,
+		// UE4.17 = 7
+		SmartNameRefactorForDeterministicCooking = 10,
+		// UE4.18 = 12
+		AddLODToCurveMetaData = 12,
+		VersionPlusOne,
+		LatestVersion = VersionPlusOne - 1
+	};
+
+	static Type Get(const FArchive& Ar)
+	{
+		static const FGuid GUID = { 0x12F88B9F, 0x88754AFC, 0xA67CD90C, 0x383ABD29 };
+		int ver = GetUE4CustomVersion(Ar, GUID);
+		if (ver >= 0)
+			return (Type)ver;
+		if (Ar.Game < GAME_UE4(16))
+			return BeforeCustomVersionWasAdded;
+		if (Ar.Game < GAME_UE4(17))
+			return (Type)3;
+		if (Ar.Game < GAME_UE4(18))
+			return (Type)7;
+		if (Ar.Game < GAME_UE4(19))
+			return AddLODToCurveMetaData;
+		// NEW_ENGINE_VERSION
+		return LatestVersion;
+	}
 };
 
 class FStripDataFlags
@@ -2020,6 +2615,7 @@ protected:
 
 extern FArchive *GDummySave;
 extern int       GForceGame;
+extern int       GForcePackageVersion;
 extern byte      GForcePlatform;
 extern byte      GForceCompMethod;
 

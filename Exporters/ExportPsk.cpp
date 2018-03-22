@@ -10,7 +10,7 @@
 #include "Psk.h"
 #include "Exporters.h"
 
-#include "UnMathTools.h"		// CVertexShare
+#include "UnMathTools.h"
 
 
 // PSK uses right-hand coordinates, but unreal uses left-hand.
@@ -18,32 +18,47 @@
 // Here we performing reverse transformation.
 #define MIRROR_MESH				1
 
-/*??
-
-- ActorX + UDK has support for vertex colors - make umodel compatible with this
-
-*/
-
 static void ExportScript(const CSkeletalMesh *Mesh, FArchive &Ar)
 {
 	assert(Mesh->OriginalMesh);
 	const char *MeshName = Mesh->OriginalMesh->Name;
 
+	// There's a good description of #exec parameters for a mesh:
+	// https://unreal.shaungoeppinger.com/skeletal-animation-import-directives/
+
 	// mesh info
 	Ar.Printf(
 		"class %s extends Actor;\n\n"
 		"#exec MESH MODELIMPORT MESH=%s MODELFILE=%s.psk\n"
-		"#exec MESH ORIGIN      MESH=%s X=%g Y=%g Z=%g YAW=%d PITCH=%d ROLL=%d\n",
+		"#exec MESH ORIGIN      MESH=%s X=%g Y=%g Z=%g YAW=%d PITCH=%d ROLL=%d\n"
+		"// rotator: P=%d Y=%d R=%d\n",
 		MeshName,
 		MeshName, MeshName,
 		MeshName, VECTOR_ARG(Mesh->MeshOrigin),
-			Mesh->RotOrigin.Yaw >> 8, Mesh->RotOrigin.Pitch >> 8, Mesh->RotOrigin.Roll >> 8
+		Mesh->RotOrigin.Yaw >> 8, Mesh->RotOrigin.Pitch >> 8, Mesh->RotOrigin.Roll >> 8,
+		Mesh->RotOrigin.Pitch, Mesh->RotOrigin.Yaw, Mesh->RotOrigin.Roll
 	);
 	// mesh scale
 	Ar.Printf(
 		"#exec MESH SCALE       MESH=%s X=%g Y=%g Z=%g\n\n",
 		MeshName, VECTOR_ARG(Mesh->MeshScale)
 	);
+	// sockets
+	for (int i = 0; i < Mesh->Sockets.Num(); i++)
+	{
+		const CSkelMeshSocket& S = Mesh->Sockets[i];
+		const CCoords& T = S.Transform;
+		FRotator R;
+		AxisToRotator(T.axis, R);
+		Ar.Printf(
+			"#exec MESH ATTACHNAME  MESH=%s BONE=\"%s\" TAG=\"%s\" YAW=%d PITCH=%d ROLL=%d X=%g Y=%g Z=%g\n"
+			"// rotator: P=%d Y=%d R=%d\n",
+			MeshName, *S.Bone, *S.Name,
+			R.Yaw >> 8, R.Pitch >> 8, R.Roll >> 8,
+			VECTOR_ARG(T.origin),
+			R.Pitch, R.Yaw, R.Roll
+		);
+	}
 }
 
 
@@ -64,23 +79,12 @@ static void ExportCommonMeshData
 
 	// using 'static' here to avoid zero-filling unused fields
 	static VChunkHeader MainHdr, PtsHdr, WedgHdr, FacesHdr, MatrHdr;
-	int i, j;
+	int i;
 
 #define SECT(n)		(Sections + n)
 
 	// main psk header
 	SAVE_CHUNK(MainHdr, "ACTRHEAD");
-
-	// share vertices
-//	appResetProfiler();
-	Share.Prepare(Verts, NumVerts, VertexSize);
-	for (i = 0; i < NumVerts; i++)
-	{
-		const CMeshVertex &S = *VERT(i);
-		Share.AddVertex(S.Position, S.Normal);
-	}
-//	appPrintProfiler();
-//	appPrintf("%d wedges were merged to %d verts\n", NumVerts, Share.Points.Num());
 
 	PtsHdr.DataCount = Share.Points.Num();
 	PtsHdr.DataSize  = sizeof(FVector);
@@ -99,7 +103,7 @@ static void ExportCommonMeshData
 	int numFaces = 0;
 	TArray<int> WedgeMat;
 	WedgeMat.Empty(NumVerts);
-	WedgeMat.Add(NumVerts);
+	WedgeMat.AddZeroed(NumVerts);
 	CIndexBuffer::IndexAccessor_t Index = Indices.GetAccessor();
 	for (i = 0; i < NumSections; i++)
 	{
@@ -120,8 +124,8 @@ static void ExportCommonMeshData
 		VVertex W;
 		const CMeshVertex &S = *VERT(i);
 		W.PointIndex = Share.WedgeToVert[i];
-		W.U          = S.UV[0].U;
-		W.V          = S.UV[0].V;
+		W.U          = S.UV.U;
+		W.V          = S.UV.V;
 		W.MatIndex   = WedgeMat[i];
 		W.Reserved   = 0;
 		W.Pad        = 0;
@@ -147,7 +151,7 @@ static void ExportCommonMeshData
 				}
 				T.MatIndex        = i;
 				T.AuxMatIndex     = 0;
-				T.SmoothingGroups = 0;
+				T.SmoothingGroups = 1;
 #if MIRROR_MESH
 				Exchange(T.WedgeIndex[0], T.WedgeIndex[1]);
 #endif
@@ -174,7 +178,7 @@ static void ExportCommonMeshData
 				}
 				T.MatIndex        = i;
 				T.AuxMatIndex     = 0;
-				T.SmoothingGroups = 0;
+				T.SmoothingGroups = 1;
 #if MIRROR_MESH
 				Exchange(T.WedgeIndex[0], T.WedgeIndex[1]);
 #endif
@@ -191,6 +195,7 @@ static void ExportCommonMeshData
 		VMaterial M;
 		memset(&M, 0, sizeof(M));
 		const UUnrealMaterial *Tex = SECT(i)->Material;
+		M.TextureIndex = i; // could be required for UT99
 		//!! this will not handle (UMaterialWithPolyFlags->Material==NULL) correctly - will make MaterialName=="None"
 		//!! (the same valid for md5mesh export)
 		if (Tex)
@@ -210,7 +215,8 @@ static void ExportCommonMeshData
 static void ExportExtraUV
 (
 	FArchive &Ar,
-	const CMeshVertex *Verts, int NumVerts, int VertexSize,
+	const CMeshUVFloat* const ExtraUV[],
+	int NumVerts,
 	int NumTexCoords
 )
 {
@@ -225,12 +231,12 @@ static void ExportExtraUV
 		char chunkName[32];
 		appSprintf(ARRAY_ARG(chunkName), "EXTRAUVS%d", j-1);
 		SAVE_CHUNK(UVHdr, chunkName);
-		for (int i = 0; i < NumVerts; i++)
+		const CMeshUVFloat* SUV = ExtraUV[j-1];
+		for (int i = 0; i < NumVerts; i++, SUV++)
 		{
 			VMeshUV UV;
-			const CMeshVertex &S = *VERT(i);
-			UV.U = S.UV[j].U;
-			UV.V = S.UV[j].V;
+			UV.U = SUV->U;
+			UV.V = SUV->V;
 			Ar << UV;
 		}
 	}
@@ -246,7 +252,31 @@ static void ExportSkeletalMeshLod(const CSkeletalMesh &Mesh, const CSkelMeshLod 
 	// using 'static' here to avoid zero-filling unused fields
 	static VChunkHeader BoneHdr, InfHdr;
 
+	int i, j;
 	CVertexShare Share;
+
+	// weld vertices
+	// The code below differs from similar code for StaticMesh export: it relies on wertex weight
+	// information to not perform occasional welding of vertices which has the same position and
+	// normal, but belongs to different bones.
+//	appResetProfiler();
+	Share.Prepare(Lod.Verts, Lod.NumVerts, sizeof(CSkelMeshVertex));
+	for (i = 0; i < Lod.NumVerts; i++)
+	{
+		const CSkelMeshVertex &S = Lod.Verts[i];
+		// Here we relies on high possibility that vertices which should be shared between
+		// triangles will have the same order of weights and bones (because most likely
+		// these vertices were duplicated by copying). Doing more complicated comparison
+		// will reduce performance with possibly reducing size of exported mesh by a few
+		// more vertices.
+		uint32 WeightsHash = S.PackedWeights;
+		for (j = 0; j < ARRAY_COUNT(S.Bone); j++)
+			WeightsHash ^= S.Bone[j] << j;
+		Share.AddVertex(S.Position, S.Normal, WeightsHash);
+	}
+//	appPrintProfiler();
+//	appPrintf("%d wedges were welded into %d verts\n", Lod.NumVerts, Share.Points.Num());
+
 	ExportCommonMeshData
 	(
 		Ar,
@@ -256,7 +286,6 @@ static void ExportSkeletalMeshLod(const CSkeletalMesh &Mesh, const CSkelMeshLod 
 		Share
 	);
 
-	int i, j;
 	int numBones = Mesh.RefSkeleton.Num();
 
 	BoneHdr.DataCount = numBones;
@@ -307,13 +336,15 @@ static void ExportSkeletalMeshLod(const CSkeletalMesh &Mesh, const CSkelMeshLod 
 	{
 		int WedgeIndex = Share.VertToWedge[i];
 		const CSkelMeshVertex &V = Lod.Verts[WedgeIndex];
+		CVec4 UnpackedWeights;
+		V.UnpackWeights(UnpackedWeights);
 		for (j = 0; j < NUM_INFLUENCES; j++)
 		{
 			if (V.Bone[j] < 0) break;
 			NumInfluences--;				// just for verification
 
 			VRawBoneInfluence I;
-			I.Weight     = V.Weight[j];
+			I.Weight     = UnpackedWeights.v[j];
 			I.BoneIndex  = V.Bone[j];
 			I.PointIndex = i;
 			Ar << I;
@@ -321,7 +352,7 @@ static void ExportSkeletalMeshLod(const CSkeletalMesh &Mesh, const CSkelMeshLod 
 	}
 	assert(NumInfluences == 0);
 
-	ExportExtraUV(Ar, Lod.Verts, Lod.NumVerts, sizeof(Lod.Verts[0]), Lod.NumTexCoords);
+	ExportExtraUV(Ar, Lod.ExtraUV, Lod.NumVerts, Lod.NumTexCoords);
 
 /*	if (!GExportPskx)						// nothing more to write
 		return;
@@ -344,7 +375,6 @@ void ExportPsk(const CSkeletalMesh *Mesh)
 	// export script file
 	if (GExportScripts)
 	{
-		char filename[512];
 		FArchive *Ar = CreateExportArchive(OriginalMesh, "%s.uc", OriginalMesh->Name);
 		if (Ar)
 		{
@@ -388,6 +418,8 @@ void ExportPsa(const CAnimSet *Anim)
 	static VChunkHeader MainHdr, BoneHdr, AnimHdr, KeyHdr;
 	int i;
 
+	if (!Anim->Sequences.Num()) return;			// empty CAnimSet
+
 	UObject *OriginalAnim = Anim->OriginalAnim;
 
 	FArchive *Ar0 = CreateExportArchive(OriginalAnim, "%s.psa", OriginalAnim->Name);
@@ -406,6 +438,7 @@ void ExportPsa(const CAnimSet *Anim)
 	{
 		FNamedBoneBinary B;
 		memset(&B, 0, sizeof(B));
+		assert(strlen(*Anim->TrackBoneNames[i]) < sizeof(B.Name));
 		strcpy(B.Name, *Anim->TrackBoneNames[i]);
 		B.Flags       = 0;						// reserved
 		B.NumChildren = 0;						// unknown here
@@ -422,7 +455,7 @@ void ExportPsa(const CAnimSet *Anim)
 	{
 		AnimInfoBinary A;
 		memset(&A, 0, sizeof(A));
-		const CAnimSequence &S = Anim->Sequences[i];
+		const CAnimSequence &S = *Anim->Sequences[i];
 		strcpy(A.Name,  *S.Name);
 		strcpy(A.Group, /*??S.Groups.Num() ? *S.Groups[0] :*/ "None");
 		A.TotalBones          = numBones;
@@ -447,7 +480,7 @@ void ExportPsa(const CAnimSet *Anim)
 	bool requireConfig = false;
 	for (i = 0; i < numAnims; i++)
 	{
-		const CAnimSequence &S = Anim->Sequences[i];
+		const CAnimSequence &S = *Anim->Sequences[i];
 		for (int t = 0; t < S.NumFrames; t++)
 		{
 			for (int b = 0; b < numBones; b++)
@@ -515,7 +548,7 @@ void ExportPsa(const CAnimSet *Anim)
 		Ar1->Printf("\n[RemoveTracks]\n");
 		for (i = 0; i < numAnims; i++)
 		{
-			const CAnimSequence &S = Anim->Sequences[i];
+			const CAnimSequence &S = *Anim->Sequences[i];
 			for (int b = 0; b < numBones; b++)
 			{
 #define FLAG_NO_TRANSLATION		1
@@ -544,6 +577,18 @@ static void ExportStaticMeshLod(const CStaticMeshLod &Lod, FArchive &Ar)
 	static VChunkHeader BoneHdr, InfHdr;
 
 	CVertexShare Share;
+
+	// weld vertices
+//	appResetProfiler();
+	Share.Prepare(Lod.Verts, Lod.NumVerts, sizeof(CStaticMeshVertex));
+	for (int i = 0; i < Lod.NumVerts; i++)
+	{
+		const CMeshVertex &S = Lod.Verts[i];
+		Share.AddVertex(S.Position, S.Normal);
+	}
+//	appPrintProfiler();
+//	appPrintf("%d wedges were welded into %d verts\n", Lod.NumVerts, Share.Points.Num());
+
 	ExportCommonMeshData
 	(
 		Ar,
@@ -561,7 +606,7 @@ static void ExportStaticMeshLod(const CStaticMeshLod &Lod, FArchive &Ar)
 	InfHdr.DataSize  = sizeof(VRawBoneInfluence);
 	SAVE_CHUNK(InfHdr, "RAWWEIGHTS");
 
-	ExportExtraUV(Ar, Lod.Verts, Lod.NumVerts, sizeof(Lod.Verts[0]), Lod.NumTexCoords);
+	ExportExtraUV(Ar, Lod.ExtraUV, Lod.NumVerts, Lod.NumTexCoords);
 
 	unguard;
 }
@@ -580,6 +625,11 @@ void ExportStaticMesh(const CStaticMesh *Mesh)
 	for (int Lod = 0; Lod < MaxLod; Lod++)
 	{
 		guard(Lod);
+		if (Mesh->Lods[Lod].Sections.Num() == 0)
+		{
+			appNotify("Mesh %s Lod %d has no sections\n", OriginalMesh->Name, Lod);
+			continue;
+		}
 		char filename[512];
 		if (Lod == 0)
 			appSprintf(ARRAY_ARG(filename), "%s.pskx", OriginalMesh->Name);

@@ -23,6 +23,8 @@
 #include "ProgressDialog.h"
 #include "AboutDialog.h"
 #include "ErrorDialog.h"
+#include "UE4VersionDialog.h"
+#include "UE4AesKeyDialog.h"
 #include "PackageScanDialog.h"
 #endif
 
@@ -39,6 +41,8 @@ CUmodelApp GApplication;
 
 bool CUmodelApp::FindObjectAndCreateVisualizer(int dir, bool forceVisualizer, bool newPackage)
 {
+	guard(CUmodelApp::FindObjectAndCreateVisualizer);
+
 	if (newPackage)
 	{
 		assert(dir > 0); // just in case
@@ -85,6 +89,8 @@ bool CUmodelApp::FindObjectAndCreateVisualizer(int dir, bool forceVisualizer, bo
 	// change visualizer
 	CreateVisualizer(Obj);
 	return true;
+
+	unguard;
 }
 
 
@@ -115,6 +121,8 @@ static HWND GetSDLWindowHandle(SDL_Window* window)
 // always return true.
 bool CUmodelApp::ShowPackageUI()
 {
+	guard(CUmodelApp::ShowPackageUI);
+
 	// When we're doing export, then switching back to GUI, then pressing "Esc",
 	// we can't return to the visualizer which was used before doing export because
 	// all object was unloaded. In this case, code will set 'packagesChanged' flag
@@ -140,14 +148,14 @@ bool CUmodelApp::ShowPackageUI()
 		TStaticArray<UnPackage*, 256> Packages;
 		for (int i = 0; i < GPackageDialog.SelectedPackages.Num(); i++)
 		{
-			const char* pkgName = *GPackageDialog.SelectedPackages[i];
+			const char* pkgName = GPackageDialog.SelectedPackages[i]->RelativeName;
 			if (!progress.Progress(pkgName, i, GPackageDialog.SelectedPackages.Num()))
 			{
 				cancelled = true;
 				break;
 			}
 			UnPackage* package = UnPackage::LoadPackage(pkgName);	// should always return non-NULL
-			if (package) Packages.AddItem(package);
+			if (package) Packages.Add(package);
 		}
 		if (cancelled)
 		{
@@ -165,15 +173,18 @@ bool CUmodelApp::ShowPackageUI()
 
 		// check whether we need to perform package unloading
 		bool needReload = false;
-		for (int i = 0; i < GFullyLoadedPackages.Num(); i++)
+		if (mode != UIPackageDialog::APPEND)
 		{
-			if (Packages.FindItem(GFullyLoadedPackages[i]) < 0)
+			for (int i = 0; i < GFullyLoadedPackages.Num(); i++)
 			{
-				// One of currently loaded packages is not needed anymore. We can't safely
-				// unload only one package because it could be linked by other loaded packages.
-				// So, unload everything.
-				needReload = true;
-				break;
+				if (Packages.FindItem(GFullyLoadedPackages[i]) < 0)
+				{
+					// One of currently loaded packages is not needed anymore. We can't safely
+					// unload only one package because it could be linked by other loaded packages.
+					// So, unload everything.
+					needReload = true;
+					break;
+				}
 			}
 		}
 
@@ -232,6 +243,7 @@ bool CUmodelApp::ShowPackageUI()
 
 		// fully load all selected packages
 		progress.SetDescription("Loading package");
+		UObject::BeginLoad();
 		for (int i = 0; i < Packages.Num(); i++)
 		{
 			UnPackage* package = Packages[i];
@@ -246,6 +258,7 @@ bool CUmodelApp::ShowPackageUI()
 				break;
 			}
 		}
+		UObject::EndLoad();
 
 		if (cancelled)
 		{
@@ -264,11 +277,13 @@ bool CUmodelApp::ShowPackageUI()
 	}
 
 	return true;
+
+	unguard;
 }
 
-void CUmodelApp::SetPackageName(const char* name)
+void CUmodelApp::SetPackage(UnPackage* package)
 {
-	GPackageDialog.SelectPackage(name);
+	GPackageDialog.SelectPackage(package);
 }
 
 void CUmodelApp::ShowErrorDialog()
@@ -276,6 +291,21 @@ void CUmodelApp::ShowErrorDialog()
 	UIErrorDialog errorDialog;
 	errorDialog.Show();
 }
+
+#if UNREAL4
+int CUmodelApp::ShowUE4UnversionedPackageDialog(int verMin, int verMax)
+{
+	UIUE4VersionDialog dialog;
+	return dialog.Show(verMin, verMax);
+}
+
+FString CUmodelApp::ShowUE4AesKeyDialog()
+{
+	UIUE4AesKeyDialog dialog;
+	return dialog.Show();
+}
+
+#endif // UNREAL4
 
 #endif // HAS_UI
 
@@ -371,7 +401,7 @@ static void TakeScreenshot(const char *ObjectName, bool CatchAlpha)
 		// if file exists, append an index
 		appSprintf(ARRAY_ARG(filename), SCREENSHOTS_DIR "/%s_%02d.tga", ObjectName, ++retry);
 	}
-	appPrintf("Writting screenshot %s\n", filename);
+	appPrintf("Writing screenshot %s\n", filename);
 	appMakeDirectoryForFile(filename);
 	FFileWriter Ar(filename);
 	int width, height;
@@ -432,7 +462,7 @@ CUmodelApp::~CUmodelApp()
 
 void CUmodelApp::Draw3D(float TimeDelta)
 {
-	UObject *Obj = (ObjIndex < UObject::GObjObjects.Num()) ? UObject::GObjObjects[ObjIndex] : NULL;
+	UObject *Obj = (UObject::GObjObjects.IsValidIndex(ObjIndex)) ? UObject::GObjObjects[ObjIndex] : NULL;
 
 	guard(CUmodelApp::Draw3D);
 
@@ -488,9 +518,13 @@ void CUmodelApp::ProcessKey(int key, bool isDown)
 
 	switch (key)
 	{
-	case SPEC_KEY(PAGEDOWN):
 	case SPEC_KEY(PAGEUP):
-		FindObjectAndCreateVisualizer((key == SPEC_KEY(PAGEDOWN)) ? 1 : -1);
+	case SDLK_KP_9:
+		FindObjectAndCreateVisualizer(-1);
+		break;
+	case SPEC_KEY(PAGEDOWN):
+	case SDLK_KP_3:
+		FindObjectAndCreateVisualizer(1);
 		break;
 	case 's'|KEY_CTRL:
 		DoScreenshot = 1;
@@ -514,7 +548,7 @@ void CUmodelApp::ProcessKey(int key, bool isDown)
 	MainMenu->Update();
 #endif
 
-	unguard;
+	unguardf("key=%X, down=%d", key, isDown);
 }
 
 
@@ -540,7 +574,7 @@ void CUmodelApp::DrawTexts()
 
 static void DumpMemory()
 {
-	appPrintf("Memory: allocated %d bytes in %d blocks\n", GTotalAllocationSize, GTotalAllocationCount);
+	appPrintf("Memory: allocated " FORMAT_SIZE("d") " bytes in %d blocks\n", GTotalAllocationSize, GTotalAllocationCount);
 	appDumpMemoryAllocations();
 }
 
@@ -591,7 +625,7 @@ void CUmodelApp::WindowCreated()
 			NewMenuItem("Export current object\tCtrl+X")
 			.SetCallback(BIND_MEM_CB(&CUmodelApp::ExportObject, this))
 			+ NewMenuSeparator()
-			+ NewMenuHyperLink("Open export folder", GSettings.ExportPath)	//!! should update if directory will be changed from UI
+			+ NewMenuHyperLink("Open export folder", *GSettings.ExportPath)	//!! should update if directory will be changed from UI
 			+ NewMenuHyperLink("Open screenshots folder", SCREENSHOTS_DIR)
 			+ NewMenuSeparator()
 			+ NewMenuItem("Scan package versions")
@@ -608,6 +642,8 @@ void CUmodelApp::WindowCreated()
 		[
 			NewMenuCheckbox("Keyboard shortcuts\tH", &IsHelpVisible)
 			+ NewMenuHyperLink("View readme", "readme.txt")	//?? add directory here
+			+ NewMenuSeparator()
+			+ NewMenuHyperLink("Tutorial videos", "https://www.youtube.com/playlist?list=PLJROJrENPVvK-V8PCTR9qBmY0Q7v4wCym")
 			+ NewMenuSeparator()
 			+ NewMenuHyperLink("UModel website", GUmodelHomepage)
 			+ NewMenuHyperLink("UModel FAQ", "http://www.gildor.org/projects/umodel/faq")

@@ -27,6 +27,8 @@ static void SaveSound(const UObject *Obj, void *Data, int DataSize, const char *
 		ext = "wav";
 	else if (!memcmp(Data, "FSB4", 4))
 		ext = "fsb";		// FMOD sound bank
+	else if (!memcmp(Data, "MSFC", 4))
+		ext = "mp3";		// PS3 MP3 codec
 
 	FArchive *Ar = CreateExportArchive(Obj, "%s.%s", Obj->Name, ext);
 	if (Ar)
@@ -76,13 +78,13 @@ struct FXmaInfoHeader
 // structure from DX10 audiodefs.h
 struct WAVEFORMATEX
 {
-	word			wFormatTag;				// Integer identifier of the format
-	word			nChannels;				// Number of audio channels
+	uint16			wFormatTag;				// Integer identifier of the format
+	uint16			nChannels;				// Number of audio channels
 	unsigned		nSamplesPerSec;			// Audio sample rate
 	unsigned		nAvgBytesPerSec;		// Bytes per second (possibly approximate)
-	word			nBlockAlign;			// Size in bytes of a sample block (all channels)
-	word			wBitsPerSample;			// Size in bits of a single per-channel sample
-	word			cbSize;					// Bytes of extra data appended to this struct
+	uint16			nBlockAlign;			// Size in bytes of a sample block (all channels)
+	uint16			wBitsPerSample;			// Size in bits of a single per-channel sample
+	uint16			cbSize;					// Bytes of extra data appended to this struct
 
 	friend FArchive& operator<<(FArchive &Ar, WAVEFORMATEX &V)
 	{
@@ -97,7 +99,7 @@ struct XMA2WAVEFORMATEX
 {
 	WAVEFORMATEX	wfx;
 
-	word			NumStreams;				// Number of audio streams (1 or 2 channels each)
+	uint16			NumStreams;				// Number of audio streams (1 or 2 channels each)
 	unsigned		ChannelMask;			// Spatial positions of the channels in this file,
 											// stored as SPEAKER_xxx values (see audiodefs.h)
 	unsigned		SamplesEncoded;			// Total number of PCM samples the file decodes to
@@ -108,7 +110,7 @@ struct XMA2WAVEFORMATEX
 	unsigned		LoopLength;				// Length of the loop region in decoded sample terms
 	byte			LoopCount;				// Number of loop repetitions; 255 = infinite
 	byte			EncoderVersion;			// Version of XMA encoder that generated the file
-	word			BlockCount;				// XMA blocks in file (and entries in its seek table)
+	uint16			BlockCount;				// XMA blocks in file (and entries in its seek table)
 
 	friend FArchive& operator<<(FArchive &Ar, XMA2WAVEFORMATEX &V)
 	{
@@ -212,6 +214,7 @@ void ExportSoundNodeWave(const USoundNodeWave *Snd)
 	// select bulk containing data
 	const FByteBulkData *bulk = NULL;
 	const char *ext = "unk";
+	int extraHeaderSize = 0;
 
 	if (Snd->RawData.ElementCount)
 	{
@@ -234,9 +237,44 @@ void ExportSoundNodeWave(const USoundNodeWave *Snd)
 	{
 		bulk = &Snd->CompressedPS3Data;
 		ext  = "ps3audio";
+		extraHeaderSize = 16;
+		//!! note: has up to 4 sounds in single object
+		//!! bulk data starts with int32[4] holding sizes of all sounds
+		//!! 0 means no data for particular object
+		//!! data encoded in MP3 format
 	}
 
-	SaveSound(Snd, bulk->BulkData, bulk->ElementCount, ext);
+	if (bulk)
+	{
+		SaveSound(Snd, OffsetPointer(bulk->BulkData, extraHeaderSize), bulk->ElementCount - extraHeaderSize, ext);
+	}
 }
 
 #endif // UNREAL3
+
+#if UNREAL4
+
+void ExportSoundWave4(const USoundWave *Snd)
+{
+	// select bulk containing data
+	const FByteBulkData *bulk = NULL;
+	const char *ext = "unk";
+	int extraHeaderSize = 0;
+
+	if (Snd->RawData.ElementCount)
+	{
+		bulk = &Snd->RawData;
+	}
+	else if (Snd->CompressedFormatData.Num())
+	{
+		bulk = &Snd->CompressedFormatData[0].Data;
+		ext = *Snd->CompressedFormatData[0].FormatName; // "OGG"
+	}
+
+	if (bulk)
+	{
+		SaveSound(Snd, bulk->BulkData, bulk->ElementCount, ext);
+	}
+}
+
+#endif // UNREAL4

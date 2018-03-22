@@ -1,6 +1,10 @@
 #ifndef __CORE_H__
 #define __CORE_H__
 
+#if _MSC_VER
+#define _CRT_SECURE_NO_WARNINGS
+#endif
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <stddef.h>
@@ -21,6 +25,7 @@
 #include "Build.h"
 
 #if RENDERING
+#	define SDL_MAIN_HANDLED			// prevent overriding of 'main' function on Windows
 #	include <SDL2/SDL.h>			//?? move outside (here for SDL_GetTicks() only?)
 #endif
 
@@ -118,11 +123,18 @@ template<>    struct CompileTimeError<true> {};
 #	define vsnwprintf			_vsnwprintf
 #	define FORCEINLINE			__forceinline
 #	define NORETURN				__declspec(noreturn)
+#	define stricmp				_stricmp
+#	define strnicmp				_strnicmp
 #	define GCC_PACK							// VC uses #pragma pack()
 #	if _MSC_VER >= 1400
 #		define IS_POD(T)		__is_pod(T)
 #	endif
+#	define FORMAT_SIZE(fmt)		"%I" fmt
 //#	pragma warning(disable : 4291)			// no matched operator delete found
+#	pragma warning(disable : 4100)			// unreferenced formal parameter
+#	pragma warning(disable : 4127)			// conditional expression is constant
+#	pragma warning(disable : 4509)			// nonstandard extension used: '..' uses SEH and '..' has destructor
+#	pragma warning(disable : 4714)			// function '...' marked as __forceinline not inlined
 	// this functions are smaller, when in intrinsic form (and, of course, faster):
 #	pragma intrinsic(memcpy, memset, memcmp, abs, fabs, _rotl8, _rotl, _rotr8, _rotr)
 	// allow nested inline expansions
@@ -157,6 +169,7 @@ typedef unsigned __int64		uint64;
 #	define stricmp				strcasecmp
 #	define strnicmp				strncasecmp
 #	define GCC_PACK				__attribute__((__packed__))
+#	define FORMAT_SIZE(fmt)		"%z" fmt
 #	undef VSTUDIO_INTEGRATION
 #	undef WIN32_USE_SEH
 #	undef HAS_UI				// not yet supported on this platform
@@ -172,7 +185,14 @@ typedef unsigned long long		uint64;
 
 // necessary types
 typedef unsigned char			byte;
-typedef unsigned short			word;
+
+// integer types of particular size (just for easier code understanding in some places)
+typedef signed char				int8;
+typedef unsigned char			uint8;			// byte
+typedef signed short			int16;
+typedef unsigned short			uint16;			// word
+typedef signed int				int32;
+typedef unsigned int			uint32;
 
 typedef size_t					address_t;
 
@@ -275,8 +295,19 @@ void appStrncpylwr(char *dst, const char *src, int count);
 void appStrcatn(char *dst, int count, const char *src);
 const char *appStristr(const char *s1, const char *s2);
 
+bool appMatchWildcard(const char *name, const char *mask, bool ignoreCase = false);
+bool appContainsWildcard(const char *string);
+
+void appNormalizeFilename(char *filename);
 void appMakeDirectory(const char *dirname);
 void appMakeDirectoryForFile(const char *filename);
+
+#define FS_FILE				1
+#define FS_DIR				2
+
+// Check file name type. Returns 0 if not exists, FS_FILE if this is a file,
+// and FS_DIR if this is a directory
+unsigned appGetFileType(const char *filename);
 
 
 // Memory management
@@ -307,7 +338,7 @@ FORCEINLINE void operator delete[](void* ptr)
 }
 
 // inplace new
-FORCEINLINE void* operator new(size_t size, void* ptr)
+FORCEINLINE void* operator new(size_t /*size*/, void* ptr)
 {
 	return ptr;
 }
@@ -336,11 +367,13 @@ private:
 
 
 #if PROFILE
+// number of dynamic allocations
 extern int GNumAllocs;
 #endif
 
-extern int GTotalAllocationSize;
-extern int GTotalAllocationCount;
+// static allocation stats
+extern size_t GTotalAllocationSize;
+extern int    GTotalAllocationCount;
 
 void appDumpMemoryAllocations();
 

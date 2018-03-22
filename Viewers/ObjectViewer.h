@@ -1,3 +1,6 @@
+#ifndef __OBJECT_VIEWER_H__
+#define __OBJECT_VIEWER_H__
+
 #include "GlWindow.h"
 
 
@@ -7,6 +10,8 @@ class CSkelMeshInstance;
 
 class CSkeletalMesh;
 class CStaticMesh;
+struct CMeshVertex;
+struct CBaseMeshLod;
 
 
 #define TEST_FILES		1		// comment line to disable some notifications
@@ -96,6 +101,8 @@ public:
 	virtual void DrawMesh(CMeshInstance *Inst);
 
 	void PrintMaterialInfo(int Index, UUnrealMaterial *Material, int NumFaces);
+
+	void DisplayUV(const CMeshVertex* Verts, int VertexSize, const CBaseMeshLod* Mesh, int UVIndex);
 };
 
 
@@ -136,10 +143,11 @@ public:
 	int				ShowSkel;					// 0 - mesh, 1 - mesh+skel, 2 - skel only
 	bool			ShowLabels;
 	bool			ShowAttach;
+	bool			ShowUV;
 
 	CSkelMeshViewer(CSkeletalMesh* Mesh, CApplication* Window);
 
-	static void TagMesh(CSkelMeshInstance *NewInst);
+	static void TagMesh(CSkelMeshInstance *Inst);
 	static void UntagAllMeshes();
 
 	virtual void ShowHelp();
@@ -152,7 +160,7 @@ public:
 
 	virtual void DrawMesh(CMeshInstance *Inst);
 
-	static TArray<CSkelMeshInstance*> Meshes;	// for displaying multipart meshes
+	static TArray<CSkelMeshInstance*> TaggedMeshes;	// for displaying multipart meshes
 
 private:
 	CSkeletalMesh	*Mesh;
@@ -174,6 +182,7 @@ public:
 
 private:
 	CStaticMesh		*Mesh;
+	bool			ShowUV;
 };
 
 
@@ -218,3 +227,5 @@ private:
 	}
 
 #endif
+
+#endif // __OBJECT_VIEWER_H__

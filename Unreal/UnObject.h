@@ -65,8 +65,8 @@ struct CPropInfo
 {
 	const char	   *Name;		// field name
 	const char	   *TypeName;	// name of the field type
-	word			Offset;		// offset of this field from the class start
-	short			Count;		// number of array items
+	uint16			Offset;		// offset of this field from the class start
+	int16			Count;		// number of array items
 };
 
 
@@ -228,7 +228,25 @@ struct enumToStr
 	const char* name;
 };
 
-#define _ENUM(name)				const enumToStr name##Names[] =
+template<class T>
+struct TEnumInfo
+{
+	FORCEINLINE static const char* GetName()
+	{
+	#ifndef __GNUC__ // this assertion always failed in gcc 4.9
+		staticAssert(0, "Working with unregistered enum");
+	#endif
+		return "UnregisteredEnum";
+	}
+};
+
+#define _ENUM(name)						\
+	template<> struct TEnumInfo<name>	\
+	{									\
+		FORCEINLINE static const char* GetName() { return #name; } \
+	};									\
+	const enumToStr name##Names[] =
+
 #define _E(name)				{ name, #name }
 
 #define REGISTER_ENUM(name)		RegisterEnum(#name, ARRAY_ARG(name##Names));
@@ -241,6 +259,11 @@ const char *EnumToName(const char *EnumName, int Value);
 // find interer value by enum name, ENUM_UNKNOWN when not found
 int NameToEnum(const char *EnumName, const char *Value);
 
+template<class T>
+FORCEINLINE const char* EnumToName(T Value)
+{
+	return EnumToName(TEnumInfo<T>::GetName(), Value);
+}
 
 /*-----------------------------------------------------------------------------
 	UObject class
@@ -278,6 +301,7 @@ public:
 		return GetTypeinfo()->Name + 1;
 	}
 	const char *GetRealClassName() const;		// class name from the package export table
+	const char* GetPackageName() const;
 	const char *GetUncookedPackageName() const;
 	void GetFullName(char *buf, int bufSize, bool IncludeObjectName = true, bool IncludeCookedPackageName = true, bool ForcePackageName = false) const;
 
@@ -301,6 +325,12 @@ public:
 
 	static void BeginLoad();
 	static void EndLoad();
+
+	// accessing object's package properties (here just to exclude UnPackage.h whenever possible)
+	const FArchive* GetPackageArchive() const;
+	int GetGame() const;
+	int GetArVer() const;
+	int GetLicenseeVer() const;
 
 	void *operator new(size_t Size)
 	{

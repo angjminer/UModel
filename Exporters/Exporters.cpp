@@ -110,7 +110,7 @@ static bool RegisterProcessedObject(const UObject* Obj)
 	}
 
 	// not registered yet
-	newIndex = ProcessedObjects.AddItem(exp);
+	newIndex = ProcessedObjects.Add(exp);
 	ProcessedObjects[newIndex].HashNext = ProcessedObjectHash[h];
 	ProcessedObjectHash[h] = newIndex;
 //	appPrintf("-> none\n");
@@ -120,6 +120,36 @@ static bool RegisterProcessedObject(const UObject* Obj)
 	unguard;
 }
 
+struct UniqueNameList
+{
+	UniqueNameList()
+	{
+		Items.Empty(1024);
+	}
+
+	struct Item
+	{
+		FString Name;
+		int Count;
+	};
+	TArray<Item> Items;
+
+	int RegisterName(const char *Name)
+	{
+		for (int i = 0; i < Items.Num(); i++)
+		{
+			Item &V = Items[i];
+			if (V.Name == Name)
+			{
+				return ++V.Count;
+			}
+		}
+		Item *N = new (Items) Item;
+		N->Name = Name;
+		N->Count = 1;
+		return 1;
+	}
+};
 
 bool ExportObject(const UObject *Obj)
 {
@@ -143,7 +173,7 @@ bool ExportObject(const UObject *Obj)
 			strcpy(ExportPath, GetExportPath(Obj));
 			const char *ClassName  = Obj->GetClassName();
 			// check for duplicate name
-			// get name uniqie index
+			// get name unique index
 			char uniqueName[256];
 			appSprintf(ARRAY_ARG(uniqueName), "%s/%s.%s", ExportPath, Obj->Name, ClassName);
 			int uniqieIdx = ExportedNames.RegisterName(uniqueName);
@@ -188,8 +218,57 @@ void appSetBaseExportDirectory(const char *Dir)
 
 const char* GetExportPath(const UObject *Obj)
 {
+	guard(GetExportPath);
+
+	static char buf[1024]; // will be returned outside
+
 	if (!BaseExportDir[0])
 		appSetBaseExportDirectory(".");	// to simplify code
+
+#if UNREAL4
+	if (Obj->Package && Obj->Package->Game >= GAME_UE4_BASE)
+	{
+		// Special path for UE4 games - its packages are usually have 1 asset per file, plus
+		// package names could be duplicated across directory tree, with use of full package
+		// paths to identify packages.
+		const char* PackageName = Obj->Package->Filename;
+		// Package name could be:
+		// a) /(GameName|Engine)/Content/... - when loaded from pak file
+		// b) [[GameName/]Content/]... - when not packaged to pak file
+		if (PackageName[0] == '/') PackageName++;
+		if (!strnicmp(PackageName, "Content/", 8))
+		{
+			PackageName += 8;
+		}
+		else
+		{
+			const char* s = strchr(PackageName, '/');
+			if (s && !strnicmp(s+1, "Content/", 8))
+			{
+				// skip 'Content'
+				PackageName = s + 9;
+			}
+		}
+		appSprintf(ARRAY_ARG(buf), "%s/%s", BaseExportDir, PackageName);
+		// Check if object's name is the same as uasset name, or if it is the same as uasset with added "_suffix".
+		// Suffix may be added by ExportObject (see 'uniqieIdx').
+		int len = strlen(Obj->Package->Name);
+		if (!strnicmp(Obj->Name, Obj->Package->Name, len) && (Obj->Name[len] == 0 || Obj->Name[len] == '_'))
+		{
+			// Object's name matches with package name, so don't create a directory for it.
+			// Strip package name, leave only path.
+			char* s = strrchr(buf, '/');
+			if (s) *s = 0;
+		}
+		else
+		{
+			// Multiple objects could be placed in this package. Strip only package's extension.
+			char* s = strrchr(buf, '.');
+			if (s) *s = 0;
+		}
+		return buf;
+	}
+#endif // UNREAL4
 
 	const char *PackageName = "None";
 	if (Obj->Package)
@@ -212,10 +291,11 @@ const char* GetExportPath(const UObject *Obj)
 		strcpy(group, Obj->GetClassName());
 	}
 
-	static char buf[1024];
 	appSprintf(ARRAY_ARG(buf), "%s/%s%s%s", BaseExportDir, PackageName,
 		(group[0]) ? "/" : "", group);
 	return buf;
+
+	unguard;
 }
 
 
@@ -275,7 +355,7 @@ FArchive *CreateExportArchive(const UObject *Obj, const char *fmt, ...)
 		if (appFileExists(filename)) return NULL;
 	}
 
-//	appPrintf("... writting %s'%s' to %s ...\n", Obj->GetClassName(), Obj->Name, filename);
+//	appPrintf("... writing %s'%s' to %s ...\n", Obj->GetClassName(), Obj->Name, filename);
 
 	appMakeDirectoryForFile(filename);
 	FFileWriter *Ar = new FFileWriter(filename, FRO_NoOpenError);

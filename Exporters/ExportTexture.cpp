@@ -4,6 +4,7 @@
 #include "UnCore.h"
 #include "UnObject.h"
 #include "UnMaterial.h"
+#include "UnMaterial3.h"
 
 #include "Exporters.h"
 
@@ -24,10 +25,10 @@
 struct GCC_PACK tgaHdr_t
 {
 	byte 	id_length, colormap_type, image_type;
-	unsigned short colormap_index, colormap_length;
+	uint16	colormap_index, colormap_length;
 	byte	colormap_size;
-	unsigned short x_origin, y_origin;				// unused
-	unsigned short width, height;
+	uint16	x_origin, y_origin;				// unused
+	uint16	width, height;
 	byte	pixel_size, attributes;
 };
 
@@ -120,7 +121,7 @@ void WriteTGA(FArchive &Ar, int width, int height, byte *pic)
 				{
 					// start new copy sequence
 					flag = dst++;
-					*flag = 0 - 1;							// 255, to be exact
+					*flag = 255;
 				}
 				*dst++ = b; *dst++ = g; *dst++ = r;			// store RGB
 				if (colorBytes == 4) *dst++ = a;			// store alpha
@@ -136,8 +137,8 @@ void WriteTGA(FArchive &Ar, int width, int height, byte *pic)
 	// write header
 	tgaHdr_t header;
 	memset(&header, 0, sizeof(header));
-	header.width      = width;
-	header.height     = height;
+	header.width  = width;
+	header.height = height;
 #if 0
 	// debug: write black/white image
 	header.pixel_size = 8;
@@ -190,6 +191,9 @@ static void WriteDDS(const CTextureData &TexData, const char *Filename)
 {
 	guard(WriteDDS);
 
+	if (!TexData.Mips.Num()) return;
+	const CMipMap& Mip = TexData.Mips[0];
+
 	unsigned fourCC = TexData.GetFourCC();
 
 	// code from CTextureData::Decompress()
@@ -201,10 +205,10 @@ static void WriteDDS(const CTextureData &TexData, const char *Filename)
 //	header.setPixelFormat(32, 0xFF, 0xFF << 8, 0xFF << 16, 0xFF << 24);	// bit count and per-channel masks
 	//!! Note: should use setFourCC for compressed formats, and setPixelFormat for uncompressed - these functions are
 	//!! incompatible. When fourcc is used, color masks are zero, and vice versa.
-	header.setWidth(TexData.USize);
-	header.setHeight(TexData.VSize);
+	header.setWidth(Mip.USize);
+	header.setHeight(Mip.VSize);
 //	header.setNormalFlag(TexData.Format == TPF_DXT5N || TexData.Format == TPF_3DC); -- required for decompression only
-	header.setLinearSize(TexData.DataSize);
+	header.setLinearSize(Mip.DataSize);
 
 	appMakeDirectoryForFile(Filename);
 
@@ -213,7 +217,7 @@ static void WriteDDS(const CTextureData &TexData, const char *Filename)
 	WriteDDSHeader(headerBuffer, header);
 	FArchive *Ar = new FFileWriter(Filename);
 	Ar->Serialize(headerBuffer, 128);
-	Ar->Serialize((byte*)TexData.CompressedData, TexData.DataSize);
+	Ar->Serialize(const_cast<byte*>(Mip.CompressedData), Mip.DataSize);
 	delete Ar;
 
 	unguard;
@@ -228,9 +232,28 @@ void ExportTexture(const UUnrealMaterial *Tex)
 	{
 		if (CheckExportFilePresence(Tex, "%s.tga", Tex->Name)) return;
 		if (CheckExportFilePresence(Tex, "%s.dds", Tex->Name)) return;
+		if (CheckExportFilePresence(Tex, "%s.png", Tex->Name)) return;
 	}
 
-	//!! for UTexture3, can check SourceArt for PNG data and save it if available
+	// for UTexture3 (UE3+), can check SourceArt for PNG data and save it if available
+	if (Tex->IsA("Texture3"))
+	{
+		// Note: there are several SourceArt texture formats available. We're detecting PNG
+		// by checking for magic value, however it is possible to analyze bPNGCompressed and
+		// ETextureSourceFormat enum to determine exact format.
+		const UTexture3* Tex3 = static_cast<const UTexture3*>(Tex);
+		const FByteBulkData& Bulk = Tex3->SourceArt;
+		if (Bulk.BulkData && memcmp(Bulk.BulkData, "\x89PNG", 4) == 0)
+		{
+			FArchive *Ar = CreateExportArchive(Tex, "%s.png", Tex->Name);
+			if (Ar)
+			{
+				Ar->Serialize(Bulk.BulkData, Bulk.ElementCount * Bulk.GetElementSize());
+				delete Ar;
+			}
+			return;
+		}
+	}
 
 	byte *pic = NULL;
 	int width, height;
@@ -244,8 +267,8 @@ void ExportTexture(const UUnrealMaterial *Tex)
 			return;
 		}
 
-		width = TexData.USize;
-		height = TexData.VSize;
+		width = TexData.Mips[0].USize;
+		height = TexData.Mips[0].VSize;
 		pic = TexData.Decompress();
 	}
 
@@ -271,15 +294,15 @@ void ExportTexture(const UUnrealMaterial *Tex)
 #endif
 
 	FArchive *Ar = CreateExportArchive(Tex, "%s.tga", Tex->Name);
-	if (!Ar)
+	if (Ar)
 	{
-		delete pic;
-		return;
+		WriteTGA(*Ar, width, height, pic);
+		delete Ar;
 	}
-	WriteTGA(*Ar, width, height, pic);
-	delete Ar;
 
 	delete pic;
+
+	Tex->ReleaseTextureData();
 
 	unguard;
 }

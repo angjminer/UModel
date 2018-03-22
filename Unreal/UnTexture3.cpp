@@ -15,7 +15,7 @@
 void UTexture3::Serialize(FArchive &Ar)
 {
 #if UNREAL4
-	if (Ar.Game >= GAME_UE4)
+	if (Ar.Game >= GAME_UE4_BASE)
 	{
 		Serialize4(Ar);
 		return;
@@ -72,7 +72,7 @@ void UTexture2D::Serialize(FArchive &Ar)
 	guard(UTexture2D::Serialize);
 
 #if UNREAL4
-	if (Ar.Game >= GAME_UE4)
+	if (Ar.Game >= GAME_UE4_BASE)
 	{
 		Serialize4(Ar);
 		return;
@@ -108,6 +108,19 @@ void UTexture2D::Serialize(FArchive &Ar)
 			Ar << unk1 << unk2 << unk3;
 		}
 		Ar << Mips;
+		if (Ar.ArVer >= 677)
+		{
+			// MK X has enum properties serialized as bytes, without text - so PixelFormat values should be remapped
+			// Insertions are:
+			//   PF_FloatRGBA_Full=14
+			//   PF_BC6=20
+			//   PF_BC7=21
+			// Other enum values are in the same order.
+			if (Format == PF_R16F)
+			{
+				Format = PF_BC7;
+			}
+		}
 		goto skip_rest_quiet;				// Injustice has some extra mipmap arrays
 	}
 #endif // MKVSDC
@@ -137,7 +150,7 @@ void UTexture2D::Serialize(FArchive &Ar)
 	tfc_guid:
 		Ar << TextureFileCacheGuid;
 	}
-#if XCOM_BUREAU
+#if XCOM
 	if (Ar.Game == GAME_XcomB) return;
 #endif
 	// Extra check for some incorrectly upgrated UE3 versions, in particular for
@@ -228,7 +241,7 @@ struct FTfcRemapEntry_DCU
 	{
 		guard(FTfcRemapEntry_DCU<<);
 		Ar << R.Hash << R.Offset << R.CollisionString;
-		if (R.CollisionString.Num() > 1) appNotify("HASH COLLISION: %s\n", *R.CollisionString);	//!!
+		if (!R.CollisionString.IsEmpty()) appNotify("HASH COLLISION: %s\n", *R.CollisionString);	//!!
 		return Ar;
 		unguard;
 	}
@@ -341,7 +354,7 @@ void UUIStreamingTextures::PostLoad()
 		char nameBuf[256];
 		appSprintf(ARRAY_ARG(nameBuf), "UITexture_%08X", S.Hash);
 		const char *name = appStrdupPool(nameBuf);
-		Textures.AddItem(Tex);
+		Textures.Add(Tex);
 		// setup UOnject
 		Tex->Name         = name;
 		Tex->Package      = Package;
@@ -373,8 +386,8 @@ void UUIStreamingTextures::PostLoad()
 			appPrintf("OFFS: %X\n", Mip->Data.BulkDataOffsetInFile);
 		}
 #if 1
-		appPrintf("%d: %s  {%08X} %dx%d %s [%I64X + %08X]\n", i, *S.TextureFileCacheName, S.Hash,
-			S.nWidth, S.nHeight, EnumToName("EPixelFormat", Tex->Format),
+		appPrintf("%d: %s  {%08X} %dx%d %s [%llX + %08X]\n", i, *S.TextureFileCacheName, S.Hash,
+			S.nWidth, S.nHeight, EnumToName(Tex->Format),
 			S.BulkDataOffsetInFile, S.BulkDataSizeOnDisk
 		);
 #endif
@@ -386,53 +399,54 @@ void UUIStreamingTextures::PostLoad()
 
 #endif // DCU_ONLINE
 
+//!! Rename "Tribes4" to "Redux" - supported in 2 UE3 games: Tribes Ascend and Blacklight Retribution
 #if TRIBES4
 
 //#define DUMP_RTC_CATALOG	1
 
-struct Tribes4MipEntry
+struct ReduxMipEntry
 {
 	byte				f1;					// always == 1
-	int					FileOffset;
+	unsigned			FileOffset;
 	int					PackedSize;
 	int					UnpackedSize;
 
-	friend FArchive& operator<<(FArchive &Ar, Tribes4MipEntry &M)
+	friend FArchive& operator<<(FArchive &Ar, ReduxMipEntry &M)
 	{
-		guard(Tribes4MipEntry<<);
+		guard(ReduxMipEntry<<);
 		return Ar << M.f1 << M.FileOffset << M.PackedSize << M.UnpackedSize;
 		unguard;
 	}
 };
 
-struct Tribes4TextureEntry
+struct ReduxTextureEntry
 {
 	FString				Name;
 	EPixelFormat		Format;				// 2, 3, 5, 7, 25
 	byte				f2;					// always = 2
-	short				USize, VSize;
-	TArray<Tribes4MipEntry>	Mips;
+	int16				USize, VSize;
+	TArray<ReduxMipEntry>	Mips;
 
-	friend FArchive& operator<<(FArchive &Ar, Tribes4TextureEntry &E)
+	friend FArchive& operator<<(FArchive &Ar, ReduxTextureEntry &E)
 	{
-		guard(Tribes4TextureEntry<<);
+		guard(ReduxTextureEntry<<);
 		// here is non-nullterminated string, so can't use FString serializer directly
 		assert(Ar.IsLoading);
 		int NameLen;
 		Ar << NameLen;
-		E.Name.Empty(NameLen + 1);
+		E.Name.GetDataArray().AddZeroed(NameLen + 1);
 		Ar.Serialize((void*)*E.Name, NameLen);
 		return Ar << (byte&)E.Format << E.f2 << E.USize << E.VSize << E.Mips;
 		unguard;
 	}
 };
 
-static TArray<Tribes4TextureEntry> tribes4Catalog;
-static FArchive *tribes4DataAr = NULL;
+static TArray<ReduxTextureEntry> reduxCatalog;
+static FArchive *reduxDataAr = NULL;
 
-static void Tribes4ReadRtcData()
+static void ReduxReadRtcData()
 {
-	guard(Tribes4ReadRtcData);
+	guard(ReduxReadRtcData);
 
 	static bool ready = false;
 	if (ready) return;
@@ -444,32 +458,40 @@ static void Tribes4ReadRtcData()
 		appPrintf("WARNING: unable to find %s\n", "texture.cache.hdr.rtc");
 		return;
 	}
+	bool NewReduxSystem = false; // old one for Tribes4, new one - Blacklight: Retribution
 	const CGameFileInfo *dataFile = appFindGameFile("texture.cache.data.rtc");
 	if (!dataFile)
 	{
-		appPrintf("WARNING: unable to find %s\n", "texture.cache.data.rtc");
-		return;
+		dataFile = appFindGameFile("texture.cache.0.data.rtc");
+		if (!dataFile)
+		{
+			appPrintf("WARNING: unable to find %s\n", "texture.cache[.0].data.rtc");
+			return;
+		}
+		NewReduxSystem = true;
 	}
-	tribes4DataAr = appCreateFileReader(dataFile);
+	reduxDataAr = appCreateFileReader(dataFile);
 
 	FArchive *Ar = appCreateFileReader(hdrFile);
 	Ar->Game  = GAME_Tribes4;
 	Ar->ArVer = 805;			// just in case
-	*Ar << tribes4Catalog;
+	if (NewReduxSystem)
+		Ar->Seek(8);			// skip 8 bytes of header: for Blacklight there are 2 ints: 0, 1
+	*Ar << reduxCatalog;
 	assert(Ar->IsEof());
 
 	delete Ar;
 
 #if DUMP_RTC_CATALOG
-	for (int i = 0; i < tribes4Catalog.Num(); i++)
+	for (int i = 0; i < reduxCatalog.Num(); i++)
 	{
-		const Tribes4TextureEntry &Tex = tribes4Catalog[i];
-		appPrintf("%d: %s - %s %d %d %d\n", i, *Tex.Name, EnumToName("EPixelFormat", Tex.Format), Tex.f2, Tex.USize, Tex.VSize);
+		const ReduxTextureEntry &Tex = reduxCatalog[i];
+		appPrintf("%d: %s - %s %d %d %d\n", i, *Tex.Name, EnumToName(Tex.Format), Tex.f2, Tex.USize, Tex.VSize);
 		if (Tex.Format != 2 && Tex.Format != 3 && Tex.Format != 5 && Tex.Format != 7 && Tex.Format != 25) appError("f1=%d", Tex.Format);
 		if (Tex.f2 != 2) appError("f2=%d", Tex.f2);
 		for (int j = 0; j < Tex.Mips.Num(); j++)
 		{
-			const Tribes4MipEntry &Mip = Tex.Mips[j];
+			const ReduxMipEntry &Mip = Tex.Mips[j];
 			assert(Mip.f1 == 1);
 			assert(Mip.PackedSize && Mip.UnpackedSize);
 			appPrintf("  %d: %d %d %d\n", j, Mip.FileOffset, Mip.PackedSize, Mip.UnpackedSize);
@@ -480,39 +502,42 @@ static void Tribes4ReadRtcData()
 	unguard;
 }
 
-static byte *FindTribes4Texture(const UTexture2D *Tex, CTextureData *TexData)
+static byte FindReduxTexture(const UTexture2D *Tex, CTextureData *TexData)
 {
-	guard(FindTribes4Texture);
+	guard(FindReduxTexture);
 
-	if (!tribes4Catalog.Num())
-		return NULL;
-	assert(tribes4DataAr);
+	if (!reduxCatalog.Num())
+		return false;
+	assert(reduxDataAr);
 
 	char ObjName[256];
 	Tex->GetFullName(ARRAY_ARG(ObjName), true, true, true);
 //	appPrintf("FIND: %s\n", ObjName);
-	for (int i = 0; i < tribes4Catalog.Num(); i++)
+	for (int i = 0; i < reduxCatalog.Num(); i++)
 	{
-		const Tribes4TextureEntry &E = tribes4Catalog[i];
-		if (!stricmp(E.Name, ObjName))
+		const ReduxTextureEntry &E = reduxCatalog[i];
+		if (!stricmp(*E.Name, ObjName))
 		{
 			// found it
 			assert(Tex->Format == E.Format);
 //			assert(Tex->SizeX == E.USize && Tex->SizeY == E.VSize); -- not true because of cooking
-			const Tribes4MipEntry &Mip = E.Mips[0];
+			const ReduxMipEntry &Mip = E.Mips[0];
 			byte *CompressedData   = (byte*)appMalloc(Mip.PackedSize);
 			byte *UncompressedData = (byte*)appMalloc(Mip.UnpackedSize);
-			tribes4DataAr->Seek(Mip.FileOffset);
-			tribes4DataAr->Serialize(CompressedData, Mip.PackedSize);
+			reduxDataAr->Seek64(Mip.FileOffset);
+			reduxDataAr->Serialize(CompressedData, Mip.PackedSize);
 			appDecompress(CompressedData, Mip.PackedSize, UncompressedData, Mip.UnpackedSize, COMPRESS_ZLIB);
 			appFree(CompressedData);
-			TexData->USize    = E.USize;
-			TexData->VSize    = E.VSize;
-			TexData->DataSize = Mip.UnpackedSize;
-			return UncompressedData;
+			CMipMap* DstMip = new (TexData->Mips) CMipMap;
+			DstMip->CompressedData = UncompressedData;
+			DstMip->ShouldFreeData = true;
+			DstMip->USize = E.USize;
+			DstMip->VSize    = E.VSize;
+			DstMip->DataSize = Mip.UnpackedSize;
+			return true;
 		}
 	}
-	return NULL;
+	return false;
 
 	unguard;
 }
@@ -602,7 +627,7 @@ static int GetRealTextureOffset_MH(const UTexture2D *Obj, int MipIndex)
 #endif // MARVEL_HEROES
 
 
-bool UTexture2D::LoadBulkTexture(const TArray<FTexture2DMipMap> &MipsArray, int MipIndex, const char* tfcSuffix) const
+bool UTexture2D::LoadBulkTexture(const TArray<FTexture2DMipMap> &MipsArray, int MipIndex, const char* tfcSuffix, bool verbose) const
 {
 	const CGameFileInfo *bulkFile = NULL;
 
@@ -612,13 +637,20 @@ bool UTexture2D::LoadBulkTexture(const TArray<FTexture2DMipMap> &MipsArray, int 
 
 	// Here: data is either in TFC file or in other package
 	char bulkFileName[256];
+	bulkFileName[0] = 0;
 	if (stricmp(TextureFileCacheName, "None") != 0)
 	{
 		// TFC file is assigned
-		strcpy(bulkFileName, TextureFileCacheName);
 		static const char* tfcExtensions[] = { "tfc", "xxx" };
 		for (int i = 0; i < ARRAY_COUNT(tfcExtensions); i++)
 		{
+			strcpy(bulkFileName, TextureFileCacheName);
+			if (char* s = strchr(bulkFileName, '.'))
+			{
+				// MK X has string with file extension - cut it
+				if (!stricmp(s, ".tfc") || !stricmp(s, ".xxx"))
+					*s = 0;
+			}
 			const char* bulkFileExt = tfcExtensions[i];
 			bulkFile = appFindGameFile(bulkFileName, bulkFileExt);
 			if (bulkFile) break;
@@ -626,7 +658,7 @@ bool UTexture2D::LoadBulkTexture(const TArray<FTexture2DMipMap> &MipsArray, int 
 			if (!bulkFile)
 			{
 				if (!tfcSuffix) tfcSuffix = "DXT";
-				appSprintf(ARRAY_ARG(bulkFileName), "%s_%s", *TextureFileCacheName, tfcSuffix);
+				appSprintf(ARRAY_ARG(bulkFileName), "%s_%s", bulkFileName, tfcSuffix);
 				bulkFile = appFindGameFile(bulkFileName, bulkFileExt);
 				if (bulkFile) break;
 			}
@@ -640,6 +672,21 @@ bool UTexture2D::LoadBulkTexture(const TArray<FTexture2DMipMap> &MipsArray, int 
 	}
 	else
 	{
+#if UNREAL4
+		if (GetGame() >= GAME_UE4_BASE)
+		{
+			//!! check for presence of BULKDATA_PayloadAtEndOfFile flag
+			strcpy(bulkFileName, Package->Filename);
+			if (Mip.Data.BulkDataFlags & BULKDATA_PayloadInSeperateFile)
+			{
+				// UE4.12+, store bulk payload in .ubulk file
+				char* s = strrchr(bulkFileName, '.');
+				if (s && !stricmp(s, ".uasset"))
+					strcpy(s, ".ubulk");
+			}
+		}
+		else
+#endif // UNREAL4
 		// data is inside another package
 		//!! copy-paste from UnPackage::CreateExport(), should separate function
 		// find outermost package
@@ -669,10 +716,12 @@ bool UTexture2D::LoadBulkTexture(const TArray<FTexture2DMipMap> &MipsArray, int 
 	}
 
 	assert(bulkFile);									// missing file is processed above
-	appPrintf("Reading %s mip level %d (%dx%d) from %s\n", Name, MipIndex, Mip.SizeX, Mip.SizeY, bulkFile->RelativeName);
+	if (verbose)
+		appPrintf("Reading %s mip level %d (%dx%d) from %s\n", Name, MipIndex, Mip.SizeX, Mip.SizeY, bulkFile->RelativeName);
+
 	FArchive *Ar = appCreateFileReader(bulkFile);
 	Ar->SetupFrom(*Package);
-	FByteBulkData *Bulk = const_cast<FByteBulkData*>(&Mip.Data);	//!! const_cast
+	FByteBulkData *Bulk = const_cast<FByteBulkData*>(&Mip.Data);
 	if (Bulk->BulkDataOffsetInFile < 0)
 	{
 #if DCU_ONLINE
@@ -698,7 +747,7 @@ bool UTexture2D::LoadBulkTexture(const TArray<FTexture2DMipMap> &MipsArray, int 
 			return false;
 		}
 	}
-//	appPrintf("Bulk %X %I64X [%d] f=%X\n", Bulk, Bulk->BulkDataOffsetInFile, Bulk->ElementCount, Bulk->BulkDataFlags);
+//	appPrintf("Bulk %X %llX [%d] f=%X\n", Bulk, Bulk->BulkDataOffsetInFile, Bulk->ElementCount, Bulk->BulkDataFlags);
 	Bulk->SerializeData(*Ar);
 	delete Ar;
 	return true;
@@ -707,24 +756,66 @@ bool UTexture2D::LoadBulkTexture(const TArray<FTexture2DMipMap> &MipsArray, int 
 }
 
 
+void UTexture2D::ReleaseTextureData() const
+{
+	guard(UTexture2D::ReleaseTextureData);
+
+	// Release bulk data loaded with GetTextureData() call. Next time GetTextureData() will be
+	// called, bulk data will be loaded again.
+
+	const TArray<FTexture2DMipMap> *MipsArray = GetMipmapArray();
+
+	for (int n = 0; n < MipsArray->Num(); n++)
+	{
+		const FTexture2DMipMap &Mip = (*MipsArray)[n];
+		const FByteBulkData &Bulk = Mip.Data;
+		if (Bulk.BulkData && (Bulk.BulkDataFlags & BULKDATA_StoreInSeparateFile))
+			const_cast<FByteBulkData*>(&Bulk)->ReleaseData();
+	}
+
+	unguardf("%s", Name);
+}
+
+
+const TArray<FTexture2DMipMap>* UTexture2D::GetMipmapArray() const
+{
+	guard(UTexture2D::GetMipmapArray);
+
+	const TArray<FTexture2DMipMap> *MipsArray = &Mips;
+#if SUPPORT_ANDROID
+	if (!MipsArray->Num())
+	{
+		if (CachedETCMips.Num())
+			MipsArray = &CachedETCMips;
+		else if (CachedPVRTCMips.Num())
+			MipsArray = &CachedPVRTCMips;
+		else if (CachedATITCMips.Num())
+			MipsArray = &CachedATITCMips;
+	}
+#endif // SUPPORT_ANDROID
+
+	return MipsArray;
+
+	unguard;
+}
+
+
 bool UTexture2D::GetTextureData(CTextureData &TexData) const
 {
 	guard(UTexture2D::GetTextureData);
 
 	TexData.OriginalFormatEnum = Format;
-	TexData.OriginalFormatName = EnumToName("EPixelFormat", Format);
+	TexData.OriginalFormatName = EnumToName(Format);
 	TexData.Obj                = this;
 
 #if TRIBES4
 	if (Package && Package->Game == GAME_Tribes4)
 	{
-		Tribes4ReadRtcData();
+		ReduxReadRtcData();
 
-		TexData.CompressedData = FindTribes4Texture(this, &TexData);	// may be NULL
-		if (TexData.CompressedData)
+		if (FindReduxTexture(this, &TexData))
 		{
-			TexData.ShouldFreeData = true;
-			TexData.Platform       = Package->Platform;
+			TexData.Platform = Package->Platform;
 		}
 	}
 #endif // TRIBES4
@@ -754,6 +845,32 @@ bool UTexture2D::GetTextureData(CTextureData &TexData) const
 	else if (Format == PF_NormalMap_HQ)
 		intFormat = TPF_BC5;
 #endif // MASSEFF
+#if UNREAL4
+#if SUPPORT_IPHONE
+	else if (Format == PF_PVRTC2)
+		intFormat = TPF_PVRTC2;
+	else if (Format == PF_PVRTC4)
+		intFormat = TPF_PVRTC4;
+#endif
+#if SUPPORT_ANDROID
+	else if (Format == PF_ETC1)
+		intFormat = TPF_ETC1;
+	else if (Format == PF_ETC2_RGB)		// GL_COMPRESSED_RGB8_ETC2
+		intFormat = TPF_ETC2_RGB;
+	else if (Format == PF_ETC2_RGBA)	// GL_COMPRESSED_RGBA8_ETC2_EAC
+		intFormat = TPF_ETC2_RGBA;
+	else if (Format == PF_ASTC_4x4)
+		intFormat = TPF_ASTC_4x4;
+	else if (Format == PF_ASTC_6x6)
+		intFormat = TPF_ASTC_6x6;
+	else if (Format == PF_ASTC_8x8)
+		intFormat = TPF_ASTC_8x8;
+	else if (Format == PF_ASTC_10x10)
+		intFormat = TPF_ASTC_10x10;
+	else if (Format == PF_ASTC_12x12)
+		intFormat = TPF_ASTC_12x12;
+#endif // SUPPORT_ANDROID
+#endif // UNREAL4
 	else
 	{
 		appNotify("Unknown texture format: %s (%d)", TexData.OriginalFormatName, Format);
@@ -773,10 +890,7 @@ bool UTexture2D::GetTextureData(CTextureData &TexData) const
 			if (Format == PF_DXT1)
 				intFormat = TPF_ETC1;
 			else if (Format == PF_DXT5)
-			{
-				appPrintf("ETC2 texture format is not supported\n"); // TPF_ETC2_EAC
-				return false;
-			}
+				intFormat = TPF_RGBA8;
 		}
 		else if (CachedPVRTCMips.Num())
 		{
@@ -795,40 +909,55 @@ bool UTexture2D::GetTextureData(CTextureData &TexData) const
 	}
 #endif // SUPPORT_ANDROID
 
-	if (!TexData.CompressedData)
+	if (TexData.Mips.Num() == 0 && MipsArray->Num())
 	{
-		bool bulkChecked = false;
-		for (int n = 0; n < MipsArray->Num(); n++)
+		bool bulkFailed = false;
+		bool dataLoaded = false;
+		int OrigUSize = (*MipsArray)[0].SizeX;
+		int OrigVSize = (*MipsArray)[0].SizeY;
+		for (int mipLevel = 0; mipLevel < MipsArray->Num(); mipLevel++)
 		{
 			// find 1st mipmap with non-null data array
 			// reference: DemoPlayerSkins.utx/DemoSkeleton have null-sized 1st 2 mips
-			const FTexture2DMipMap &Mip = (*MipsArray)[n];
+			const FTexture2DMipMap &Mip = (*MipsArray)[mipLevel];
 			const FByteBulkData &Bulk = Mip.Data;
 			if (!Mip.Data.BulkData)
 			{
-				//?? Separate this function ?
 				// check for external bulk
+				//?? Separate this function ?
 				//!! * -notfc cmdline switch
 				//!! * material viewer: support switching mip levels (for xbox decompression testing)
 				if (Bulk.BulkDataFlags & BULKDATA_Unused) continue;		// mip level is stripped
-				if (!(Bulk.BulkDataFlags & BULKDATA_StoreInSeparateFile)) continue;
+				if (!(Bulk.BulkDataFlags & BULKDATA_StoreInSeparateFile)) continue; // equals to BULKDATA_PayloadAtEndOfFile for UE4
 				// some optimization in a case of missing bulk file
-				if (bulkChecked) continue;				// already checked for previous mip levels
-				bulkChecked = true;
-				if (!LoadBulkTexture(*MipsArray, n, tfcSuffix)) continue;	// note: this could be called for any mip level, not for the 1st only
+				if (bulkFailed) continue;				// already checked for previous mip levels - no TFC file exists
+				if (!LoadBulkTexture(*MipsArray, mipLevel, tfcSuffix, !dataLoaded))
+				{
+					bulkFailed = true;
+					continue;	// note: this could be called for any mip level, not for the 1st only
+				}
+				else
+				{
+					dataLoaded = true;
+				}
 			}
 			// this mipmap has data
-			TexData.CompressedData = Bulk.BulkData;
-			TexData.USize          = Mip.SizeX;
-			TexData.VSize          = Mip.SizeY;
-			TexData.DataSize       = Bulk.ElementCount * Bulk.GetElementSize();
-			TexData.Platform       = Package->Platform;
-			break;
+			CMipMap* DstMip = new (TexData.Mips) CMipMap;
+			DstMip->CompressedData = Bulk.BulkData;
+			DstMip->DataSize = Bulk.ElementCount * Bulk.GetElementSize();
+			DstMip->ShouldFreeData = false;
+			// Note: UE3 can store incorrect SizeX/SizeY for lowest mips - these values could have 4x4 for all smaller mips
+			// (perhaps minimal size of DXT block). So compute mip size by ourselves.
+			DstMip->USize = max(1, OrigUSize >> mipLevel);
+			DstMip->VSize = max(1, OrigVSize >> mipLevel);
+//			printf("+%d: %d x %d (%X)\n", mipLevel, DstMip->USize, DstMip->VSize, DstMip->DataSize);
+			TexData.Platform = Package->Platform;
 		}
 	}
 
+	// Older Android and iOS UE3 versions didn't have dedicated CachedETCMips etc, all data were stored in Mips, but with different format
 #if SUPPORT_IPHONE
-	if (Package->Platform == PLATFORM_IOS)
+	if (Package->Platform == PLATFORM_IOS && Mips.Num())
 	{
 		if (Format == PF_DXT1)
 			intFormat = bForcePVRTC4 ? TPF_PVRTC4 : TPF_PVRTC2;
@@ -837,14 +966,35 @@ bool UTexture2D::GetTextureData(CTextureData &TexData) const
 	}
 #endif // SUPPORT_IPHONE
 
+#if SUPPORT_ANDROID
+	if (Package->Platform == PLATFORM_ANDROID && Mips.Num())
+	{
+		if (Format == PF_DXT1)
+			intFormat = TPF_ETC1;
+		else if (Format == PF_DXT5)
+			intFormat = TPF_RGBA4;	// probably check BytesPerPixel - should be 2 for this format
+	}
+#endif // SUPPORT_ANDROID
+
 	TexData.Format = intFormat;
+	TexData.isNormalmap = (CompressionSettings == TC_Normalmap);
 
 #if SUPPORT_XBOX360
 	if (TexData.Platform == PLATFORM_XBOX360)
-		TexData.DecodeXBox360();
-#endif
+	{
+		for (int MipLevel = 0; MipLevel < TexData.Mips.Num(); MipLevel++)
+		{
+			if (!TexData.DecodeXBox360(MipLevel))
+			{
+				// failed to decode this mip
+				TexData.Mips.RemoveAt(MipLevel, TexData.Mips.Num() - MipLevel);
+				break;
+			}
+		}
+	}
+#endif // SUPPORT_XBOX360
 
-	return (TexData.CompressedData != NULL);
+	return (TexData.Mips.Num() > 0);
 
 	unguardf("%s", Name);
 }

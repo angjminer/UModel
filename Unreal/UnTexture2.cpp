@@ -3,7 +3,6 @@
 #include "UnObject.h"
 #include "UnMaterial.h"
 #include "UnMaterial2.h"
-#include "UnPackage.h"
 
 //#define XPR_DEBUG			1
 
@@ -36,7 +35,7 @@ void UTexture::Serialize(FArchive &Ar)
 		// serialize mips using AR_INDEX count (this game uses int for array counts in all other places)
 		int Count;
 		Ar << AR_INDEX(Count);
-		Mips.Add(Count);
+		Mips.AddDefaulted(Count);
 		for (int i = 0; i < Count; i++)
 			Ar << Mips[i];
 		return;
@@ -403,7 +402,7 @@ static byte *FindBioTexture(const UTexture *Tex)
 			for (int k = 0; k < File.Items.Num(); k++)
 			{
 				const BioBulkCatalogItem &Item = File.Items[k];
-				if (!strcmp(Tex->Name, Item.ObjectName))
+				if (!strcmp(Tex->Name, *Item.ObjectName))
 				{
 					if (abs(needSize - Item.DataSize) > 0x4000)		// differs in 16k
 					{
@@ -418,7 +417,7 @@ static byte *FindBioTexture(const UTexture *Tex)
 						Tex->HasBeenStripped, Tex->StrippedNumMips);
 #endif
 					// found
-					const CGameFileInfo *bulkFile = appFindGameFile(File.Filename);
+					const CGameFileInfo *bulkFile = appFindGameFile(*File.Filename);
 					if (!bulkFile)
 					{
 						// no bulk file
@@ -451,34 +450,48 @@ bool UTexture::GetTextureData(CTextureData &TexData) const
 
 	TexData.Platform           = PLATFORM_PC;
 	TexData.OriginalFormatEnum = Format;
-	TexData.OriginalFormatName = EnumToName("ETextureFormat", Format);
+	TexData.OriginalFormatName = EnumToName(Format);
 	TexData.Obj                = this;
 	TexData.Palette            = Palette;
 
+	const FArchive* PackageAr = GetPackageArchive();
+
 	// process external sources for some games
 #if BIOSHOCK
-	if (Package && Package->Game == GAME_Bioshock && CachedBulkDataSize) //?? check bStripped or Baked ?
+	if (PackageAr && PackageAr->Game == GAME_Bioshock && CachedBulkDataSize) //?? check bStripped or Baked ?
 	{
-		TexData.CompressedData = FindBioTexture(this);	// may be NULL
-		TexData.ShouldFreeData = (TexData.CompressedData != NULL);
-		TexData.USize          = USize;
-		TexData.VSize          = VSize;
-		TexData.DataSize       = CachedBulkDataSize;
-		TexData.Platform       = Package->Platform;
+		byte* CompressedData = FindBioTexture(this);	// may be NULL
+		if (CompressedData)
+		{
+			CMipMap* DstMip = new (TexData.Mips) CMipMap;
+			DstMip->CompressedData = CompressedData;
+			DstMip->ShouldFreeData = true;
+			DstMip->USize = USize;
+			DstMip->VSize = VSize;
+			DstMip->DataSize = (int)CachedBulkDataSize;
+		}
+		TexData.Platform = PackageAr->Platform;
 	}
 #endif // BIOSHOCK
 #if UC2
-	if (Package && Package->Engine() == GAME_UE2X)
+	if (PackageAr && PackageAr->Engine() == GAME_UE2X)
 	{
 		// try to find texture inside XBox xpr files
-		TexData.CompressedData = FindXprData(Name, &TexData.DataSize);
-		TexData.ShouldFreeData = (TexData.CompressedData != NULL);
-		TexData.USize          = USize;
-		TexData.VSize          = VSize;
+		int DataSize;
+		byte* CompressedData = FindXprData(Name, &DataSize);	// may be NULL
+		if (CompressedData)
+		{
+			CMipMap* DstMip = new (TexData.Mips) CMipMap;
+			DstMip->CompressedData = CompressedData;
+			DstMip->ShouldFreeData = true;
+			DstMip->USize = USize;
+			DstMip->VSize = VSize;
+			DstMip->DataSize = DataSize;
+		}
 	}
 #endif // UC2
 
-	if (!TexData.CompressedData)
+	if (TexData.Mips.Num() == 0)
 	{
 		// texture was not taken from external source
 		for (int n = 0; n < Mips.Num(); n++)
@@ -488,10 +501,12 @@ bool UTexture::GetTextureData(CTextureData &TexData) const
 			const FMipmap &Mip = Mips[n];
 			if (!Mip.DataArray.Num())
 				continue;
-			TexData.CompressedData = &Mip.DataArray[0];
-			TexData.USize          = Mip.USize;
-			TexData.VSize          = Mip.VSize;
-			TexData.DataSize       = Mip.DataArray.Num();
+			CMipMap* DstMip = new (TexData.Mips) CMipMap;
+			DstMip->CompressedData = &Mip.DataArray[0];
+			DstMip->ShouldFreeData = false;
+			DstMip->USize = Mip.USize;
+			DstMip->VSize = Mip.VSize;
+			DstMip->DataSize = Mip.DataArray.Num();
 			break;
 		}
 	}
@@ -499,7 +514,7 @@ bool UTexture::GetTextureData(CTextureData &TexData) const
 	ETexturePixelFormat intFormat;
 
 	//?? return old code back - UE1 and UE2 differs in codes 6 and 7 only
-	if (Package && (Package->Engine() == GAME_UE1))
+	if (Package && (PackageAr->Engine() == GAME_UE1))
 	{
 		// UE1 has different ETextureFormat layout
 		switch (Format)
@@ -578,34 +593,43 @@ bool UTexture::GetTextureData(CTextureData &TexData) const
 	TexData.Format = intFormat;
 
 #if BIOSHOCK && SUPPORT_XBOX360
-	if (TexData.CompressedData && TexData.Platform == PLATFORM_XBOX360)
-		TexData.DecodeXBox360();
-#endif
+	if (TexData.Mips.Num() && TexData.Platform == PLATFORM_XBOX360)
+	{
+		for (int MipLevel = 0; MipLevel < TexData.Mips.Num(); MipLevel++)
+		{
+			if (!TexData.DecodeXBox360(MipLevel))
+			{
+				// failed to decode this mip
+				TexData.Mips.RemoveAt(MipLevel, TexData.Mips.Num() - MipLevel);
+				break;
+			}
+		}
+	}
+#endif // BIOSHOCK && SUPPORT_XBOX360
 #if BIOSHOCK
-	if (Package && Package->Game == GAME_Bioshock)
+	if (Package && PackageAr->Game == GAME_Bioshock)
 	{
 		// This game has DataSize stored for all mipmaps, we should compute side of 1st mipmap
 		// in order to accept this value when uploading texture to video card (some vendors rejects
 		// large values)
 		//?? Place code to CTextureData method?
 		const CPixelFormatInfo &Info = PixelFormatInfo[intFormat];
-		int bytesPerBlock = Info.BytesPerBlock;
-		int numBlocks = TexData.USize * TexData.VSize / (Info.BlockSizeX * Info.BlockSizeY);	// used for validation only
+		int numBlocks = TexData.Mips[0].USize * TexData.Mips[0].VSize / (Info.BlockSizeX * Info.BlockSizeY);	// used for validation only
 		int requiredDataSize = numBlocks * Info.BytesPerBlock;
-		if (requiredDataSize > TexData.DataSize)
+		if (requiredDataSize > TexData.Mips[0].DataSize)
 		{
 			appNotify("Bioshock texture %s: data too small; %dx%d, requires %X bytes, got %X\n",
-				Name, TexData.USize, TexData.VSize, requiredDataSize, TexData.DataSize);
+				Name, TexData.Mips[0].USize, TexData.Mips[0].VSize, requiredDataSize, TexData.Mips[0].DataSize);
 		}
-		else if (requiredDataSize < TexData.DataSize)
+		else if (requiredDataSize < TexData.Mips[0].DataSize)
 		{
-//			appPrintf("Bioshock texture %s: stripping data size from %X to %X\n", Name, TexData.DataSize, requiredDataSize);
-			TexData.DataSize = requiredDataSize;
+//			appPrintf("Bioshock texture %s: stripping data size from %X to %X\n", Name, TexData.Mips[0].DataSize, requiredDataSize);
+			TexData.Mips[0].DataSize = requiredDataSize;
 		}
 	}
 #endif // BIOSHOCK
 
-	return (TexData.CompressedData != NULL);
+	return (TexData.Mips.Num() > 0);
 
 	unguardf("%s", Name);
 }

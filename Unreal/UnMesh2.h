@@ -92,8 +92,8 @@ SIMPLE_TYPE(FMeshNorm, unsigned)
 // LOD-style triangular polygon in a mesh, which references three textured vertices.
 struct FMeshFace
 {
-	word			iWedge[3];				// Textured Vertex indices.
-	word			MaterialIndex;			// Source Material (= texture plus unique flags) index.
+	uint16			iWedge[3];				// Textured Vertex indices.
+	uint16			MaterialIndex;			// Source Material (= texture plus unique flags) index.
 
 	friend FArchive& operator<<(FArchive &Ar, FMeshFace &F)
 	{
@@ -103,7 +103,7 @@ struct FMeshFace
 	}
 };
 
-SIMPLE_TYPE(FMeshFace, word)
+SIMPLE_TYPE(FMeshFace, uint16)
 
 // UE1 name: FMeshUV
 struct FMeshUV1
@@ -132,7 +132,7 @@ SIMPLE_TYPE(FMeshUV1, byte)
 // note: UE2 uses FMeshUVFloat
 struct FMeshTri
 {
-	word			iVertex[3];				// Vertex indices.
+	uint16			iVertex[3];				// Vertex indices.
 	FMeshUV1		Tex[3];					// Texture UV coordinates (byte[2]).
 	unsigned		PolyFlags;				// Surface flags.
 	int				TextureIndex;			// Source texture index.
@@ -149,7 +149,7 @@ struct FMeshTri
 // the same as FMeshTri, but used float UV
 struct FMeshTri2
 {
-	word			iVertex[3];				// Vertex indices.
+	uint16			iVertex[3];				// Vertex indices.
 	FMeshUVFloat	Tex[3];					// Texture UV coordinates (float[2]).
 	unsigned		PolyFlags;				// Surface flags.
 	int				TextureIndex;			// Source texture index.
@@ -171,7 +171,7 @@ struct FMeshTri2
 // Corresponds to UT1 FMeshExtWedge.
 struct FMeshWedge
 {
-	word			iVertex;				// Vertex index.
+	uint16			iVertex;				// Vertex index.
 	FMeshUVFloat	TexUV;					// Texture UV coordinates.
 	friend FArchive& operator<<(FArchive &Ar, FMeshWedge &T)
 	{
@@ -219,6 +219,14 @@ struct FMeshAnimNotify
 #endif
 		if (Ar.ArVer >= 112)
 			Ar << N.NotifyObj;
+#if LINEAGE2
+		if (Ar.Game == GAME_Lineage2 && Ar.ArVer >= 131)
+		{
+			int StringLen;
+			Ar << StringLen;
+			Ar.Seek(Ar.Tell() + StringLen * 2);
+		}
+#endif // LINEAGE2
 		return Ar;
 		unguard;
 	}
@@ -320,7 +328,7 @@ struct FMeshAnimSeq
 			FName tmpGroup;					// single group
 			Ar << tmpGroup;
 			if (strcmp(tmpGroup, "None") != 0)
-				A.Groups.AddItem(tmpGroup);
+				A.Groups.Add(tmpGroup);
 		}
 		else
 #endif // UNREAL1
@@ -389,9 +397,9 @@ public:
 	FVector				MeshScale;
 	FVector				MeshOrigin;
 	FRotator			RotOrigin;
-	TArray<word>		FaceLevel;
+	TArray<uint16>		FaceLevel;
 	TArray<FMeshFace>	Faces;				// empty for USkeletalMesh
-	TArray<word>		CollapseWedgeThus;	// ...
+	TArray<uint16>		CollapseWedgeThus;	// ...
 	TArray<FMeshWedge>	Wedges;				// ...
 	TArray<FMeshMaterial> Materials;
 	float				MeshScaleMax;
@@ -444,7 +452,7 @@ SIMPLE_TYPE(FAnimMeshVertex, float)
 
 struct FRawIndexBuffer
 {
-	TArray<word>	Indices;
+	TArray<uint16>	Indices;
 //	int64			CacheId;
 	int				Revision;
 
@@ -544,12 +552,12 @@ public:
 	USkeletalMesh class
 -----------------------------------------------------------------------------*/
 
-// similar to VRawBoneInfluence, but used 'word' instead of 'int'
+// similar to VRawBoneInfluence, but used 'uint16' instead of 'int32'
 struct FVertInfluence
 {
 	float			Weight;
-	word			PointIndex;
-	word			BoneIndex;
+	uint16			PointIndex;
+	uint16			BoneIndex;
 
 	friend FArchive& operator<<(FArchive &Ar, FVertInfluence &I)
 	{
@@ -562,7 +570,7 @@ RAW_TYPE(FVertInfluence)
 
 struct VWeightIndex
 {
-	TArray<word>	BoneInfIndices;			// array of vertex indices (in Points array)
+	TArray<uint16>	BoneInfIndices;			// array of vertex indices (in Points array)
 	int				StartBoneInf;			// start index in BoneInfluences array
 
 	friend FArchive& operator<<(FArchive &Ar, VWeightIndex &I)
@@ -574,8 +582,8 @@ struct VWeightIndex
 
 struct VBoneInfluence						// Weight and bone number
 {
-	word			BoneWeight;				// 0..65535 == 0..1
-	word			BoneIndex;
+	uint16			BoneWeight;				// 0..65535 == 0..1
+	uint16			BoneIndex;
 
 	friend FArchive& operator<<(FArchive &Ar, VBoneInfluence &V)
 	{
@@ -583,7 +591,7 @@ struct VBoneInfluence						// Weight and bone number
 	}
 };
 
-SIMPLE_TYPE(VBoneInfluence, word)
+SIMPLE_TYPE(VBoneInfluence, uint16)
 
 
 //
@@ -660,7 +668,7 @@ struct FSkelBoneBox
 // This is an extended FMeshFace structure
 struct VTriangle
 {
-	word			WedgeIndex[3];			// Point to three vertices in the vertex list.
+	uint16			WedgeIndex[3];			// Point to three vertices in the vertex list.
 	byte			MatIndex;				// Materials can be anything.
 	byte			AuxMatIndex;			// Second material (unused).
 	unsigned		SmoothingGroups;		// 32-bit flag for smoothing groups.
@@ -690,25 +698,25 @@ RAW_TYPE(FSkinPoint)
 
 struct FSkelMeshSection
 {
-	word			MaterialIndex;
-	word			MinStreamIndex;			// rigid section only
-	word			MinWedgeIndex;
-	word			MaxWedgeIndex;
-	word			NumStreamIndices;		// rigid section only
-//	word			fA;						// not serialized, not used
-	word			BoneIndex;				// rigid section only
-	word			fE;						// serialized, not used
-	word			FirstFace;
-	word			NumFaces;
+	uint16			MaterialIndex;
+	uint16			MinStreamIndex;			// rigid section only
+	uint16			MinWedgeIndex;
+	uint16			MaxWedgeIndex;
+	uint16			NumStreamIndices;		// rigid section only
+//	uint16			fA;						// not serialized, not used
+	uint16			BoneIndex;				// rigid section only
+	uint16			fE;						// serialized, not used
+	uint16			FirstFace;
+	uint16			NumFaces;
 #if LINEAGE2
-	TArray<int>		LineageBoneMap;			// for smooth sections only
+	TArray<int>		LineageBoneMap;			// for soft sections only
 #endif
 	// Rigid sections:
 	//	MinWedgeIndex/MaxWedgeIndex -> FStaticLODModel.Wedges
 	//	NumStreamIndices = NumFaces*3 == MaxWedgeIndex-MinWedgeIndex+1
 	//	MinStreamIndex/NumStreamIndices -> FStaticLODModel.StaticIndices.Indices
 	//	MinWedgeIndex -> FStaticLODModel.VertexStream.Verts
-	// Smooth sections:
+	// Soft sections:
 	//	NumStreamIndices should contain MaxWedgeIndex-MinWedgeIndex+1 (new imported meshes?),
 	//	but older package versions contains something different (should not rely on this field)
 	//	Other fields are unitialized
@@ -785,8 +793,8 @@ struct FRag2FSkinGPUVertexStream
 
 struct FRag2Unk1
 {
-	word			f0;
-	TArray<word>	f2;
+	uint16			f0;
+	TArray<uint16>	f2;
 
 	friend FArchive& operator<<(FArchive &Ar, FRag2Unk1 &S)
 	{
@@ -844,7 +852,7 @@ SIMPLE_TYPE(FBTUnk3, float)
 
 struct FUC2Vector
 {
-	short			X, Y, Z;
+	int16			X, Y, Z;
 
 	friend FArchive& operator<<(FArchive &Ar, FUC2Vector &V)
 	{
@@ -874,7 +882,7 @@ struct FUC2Normal
 
 struct FUC2Int
 {
-	short			V;
+	int16			V;
 
 	friend FArchive& operator<<(FArchive &Ar, FUC2Int &V)
 	{
@@ -934,8 +942,8 @@ struct FUC2Unk1
 
 struct FUC2Unk2
 {
-	word			f0;
-	TArray<word>	f4;
+	uint16			f0;
+	TArray<uint16>	f4;
 
 	friend FArchive& operator<<(FArchive &Ar, FUC2Unk2 &S)
 	{
@@ -949,12 +957,12 @@ struct FUC2Unk2
 
 struct FStaticLODModel
 {
-	TArray<unsigned>		SkinningData;		// floating stream format, contains U/V, weights etc
-	TArray<FSkinPoint>		SkinPoints;			// smooth surface points
-	int						NumDynWedges;		// number of wedges in smooth sections
-	TArray<FSkelMeshSection> SmoothSections;
+	TArray<uint32>			SkinningData;		// floating stream format, contains encoded UV and weights for each of SkinPoints
+	TArray<FSkinPoint>		SkinPoints;			// soft surface points
+	int						NumSoftWedges;		// number of wedges in soft sections
+	TArray<FSkelMeshSection> SoftSections;
 	TArray<FSkelMeshSection> RigidSections;
-	FRawIndexBuffer			SmoothIndices;
+	FRawIndexBuffer			SoftIndices;
 	FRawIndexBuffer			RigidIndices;
 	FSkinVertexStream		VertexStream;		// for rigid parts
 	TLazyArray<FVertInfluence> VertInfluences;
@@ -992,11 +1000,24 @@ struct FStaticLODModel
 			Ar << unk0;
 		}
 #endif // SWRC
-		Ar << M.SkinningData << M.SkinPoints << M.NumDynWedges;
-		Ar << M.SmoothSections << M.RigidSections << M.SmoothIndices << M.RigidIndices;
+		Ar << M.SkinningData << M.SkinPoints << M.NumSoftWedges;
+#if EOS
+		if (Ar.Game == GAME_EOS && Ar.ArLicenseeVer >= 42)
+		{
+			TArray<int> unk;
+			Ar << unk;
+		}
+#endif // EOS
+		Ar << M.SoftSections << M.RigidSections << M.SoftIndices << M.RigidIndices;
 		Ar << M.VertexStream;
 		Ar << M.VertInfluences << M.Wedges << M.Faces << M.Points;
-		Ar << M.LODDistanceFactor << M.LODHysteresis << M.NumSharedVerts;
+		Ar << M.LODDistanceFactor;
+#if EOS
+		if (Ar.Game == GAME_EOS && Ar.ArLicenseeVer >= 42) goto no_lod_hysteresis;
+#endif
+		Ar << M.LODHysteresis;
+	no_lod_hysteresis:
+		Ar << M.NumSharedVerts;
 		Ar << M.LODMaxInfluences << M.f114 << M.f118;
 #if TRIBES3
 		if ((Ar.Game == GAME_Tribes3 || Ar.Game == GAME_Swat4) && t3_hdrSV >= 1)
@@ -1021,7 +1042,7 @@ struct FStaticLODModel
 			FRawIndexBuffer unk2;
 			FRag2FSkinGPUVertexStream unk3;
 			TArray<FRag2Unk1> unk4;
-			// TArray of word[9]
+			// TArray of uint16[9]
 			Ar << AR_INDEX(tmp);
 			Ar.Seek(Ar.Tell() + tmp*9*2);
 			// other ...
@@ -1078,7 +1099,7 @@ struct FStaticLODModel
 			if (Ar.ArVer >= 127)
 			{
 				TArray<FSkelMeshSection> f98;
-				TArray<word>		fB0;
+				TArray<uint16>		fB0;
 				int					fBC;
 				FUC2Unk1			fC0;
 				TArray<FUC2Unk2>	fEC;
@@ -1105,11 +1126,11 @@ struct FStaticLODModel
 // old USkeletalMesh
 struct FLODMeshSection
 {
-	short					f0, f2, f4;
-	short					LastIndex;
-	short					f8, fA, fC;
-	short					iFace;
-	short					f10;
+	int16					f0, f2, f4;
+	int16					LastIndex;
+	int16					f8, fA, fC;
+	int16					iFace;
+	int16					f10;
 //	FAnimMeshVertexStream	VertStream;
 //	FRawIndexBuffer			IndexBuffer;
 
@@ -1125,7 +1146,7 @@ struct FLODMeshSection
 
 struct FT3Unk1
 {
-	short		f0[3];
+	int16		f0[3];
 	byte		f1[2];
 	int			f2;
 
@@ -1145,8 +1166,8 @@ public:
 	TLazyArray<FMeshWedge>	Wedges;			// note: have ULodMesh.Wedges
 	TLazyArray<VTriangle>	Triangles;
 	TLazyArray<FVertInfluence> VertInfluences;
-	TLazyArray<word>		CollapseWedge;	// Num == Wedges.Num; used to automatically build StaticLODModels
-	TLazyArray<word>		f1C8;			// Num == Triangles.Num, element = index in Points array; not used?
+	TLazyArray<uint16>		CollapseWedge;	// Num == Wedges.Num; used to automatically build StaticLODModels
+	TLazyArray<uint16>		f1C8;			// Num == Triangles.Num, element = index in Points array; not used?
 	TArray<FMeshBone>		RefSkeleton;
 	int						SkeletalDepth;
 	TArray<FStaticLODModel>	LODModels;
@@ -1453,11 +1474,11 @@ struct FStaticMeshTriangle;
 struct FStaticMeshSection
 {
 	int						f4;				// always 0 ??
-	word					FirstIndex;		// first index
-	word					FirstVertex;	// first used vertex
-	word					LastVertex;		// last used vertex
-	word					fE;				// ALMOST always equals to f10
-	word					NumFaces;		// number of faces in section
+	uint16					FirstIndex;		// first index
+	uint16					FirstVertex;	// first used vertex
+	uint16					LastVertex;		// last used vertex
+	uint16					fE;				// ALMOST always equals to f10
+	uint16					NumFaces;		// number of faces in section
 	// Note: UE2X uses "NumFaces" as "LastIndex"
 
 	friend FArchive& operator<<(FArchive &Ar, FStaticMeshSection &S)

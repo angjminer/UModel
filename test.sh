@@ -4,7 +4,7 @@ function usage()
 {
 	cat <<EOF
 Usage:
-    test.sh [--64][--nobuild] [--exe=...] [--game=...] <umodel options>
+    test.sh [--64][--nobuild] [--exe=...] [--<game>] <umodel options>
 
 Options:
     --64                    build 64-bit version
@@ -13,6 +13,7 @@ Options:
     --<game>                choose predefined game path; <game> = ut2|ut3|gow2 etc
     --debug                 start with -debug option
     --help                  display this help message
+    --path=<path>			use instead of -path=... when path has spaces
     -path=<path>            set game path; will disable default game substitution
 EOF
 	exit
@@ -95,7 +96,7 @@ function run()
 	else
 		console_title "$exe $debugOpt $@"
 		echo "Starting $exe $debugOpt $@"
-		./$exe $@
+		./$exe $debugOpt $@
 	fi
 }
 
@@ -152,8 +153,19 @@ function ut3()
 }
 function ut4()
 {
-	CheckDir C:/Projects/Epic/UnrealTournament4/UnrealTournament/Saved/Cooked/WindowsNoEditor/UnrealTournament/Content
-	run $*
+	CheckDir C:/3-UnrealEngine/UnrealTournamentDev/UnrealTournament/Content/Paks
+#	CheckDir C:/Projects/Epic/UnrealTournament4/UnrealTournament/Saved/Cooked/WindowsNoEditor/UnrealTournament/Content
+	run -game=ue4.16 $*
+}
+function paragon()
+{
+	CheckDir C:/3-UnrealEngine/Paragon/OrionGame/Content/Paks
+	run -game=paragon $*
+}
+function fortnite()
+{
+	CheckDir C:/3-UnrealEngine/Fortnite/FortniteGame/Content/Paks
+	run -game=ue4.19 $*
 }
 function ue3()
 {
@@ -165,6 +177,11 @@ function ue4()
 	CheckDir C:/Projects/Epic/UnrealEngine4
 	run $*
 }
+function gears4()
+{
+	CheckDir data/4/GOW4
+	run -game=gears4 $*
+}
 function gow()    { run1 "data/3/GearsOfWar" $*;          }
 function gow2()   { run1 "data/3X/GearsOfWar2_X360" $*;   }
 function gow3()   { run1 "data/3X/GOW3_beta_X360" $*;     }
@@ -174,6 +191,16 @@ function l2()     { run1 "data/2/Lineage2" $*;            }
 function bio()
 {
 	CheckDir {c,e}:/GAMES/BioShock data/2/Bioshock
+	run $*
+}
+function bio1r()
+{
+	CheckDir "${steam[0]/%/BioShock Remastered/ContentBaked/pc}" "data/2/Bioshock_remaster"
+	run $*
+}
+function bio2r()
+{
+	CheckDir "${steam[0]/%/BioShock 2 Remastered/ContentBaked/pc}" "data/2/Bioshock2_remaster"
 	run $*
 }
 function alice()
@@ -191,9 +218,16 @@ function bat2()
 	CheckDir "E:/GAMES/Batman Arkham City/BmGame" data/3/Batman2
 	run $*
 }
+function bat3()
+{
+	CheckDir "${steam[@]/%/Batman Arkham Origins/SinglePlayer/BMGame}"
+	CheckDir "E:/GAMES/Batman Arkham City/BmGame" data/3/Batman2
+	run $*
+}
 function tr4()    { run1 "data/3/Tribes4" $*;     }
-
 function thief()  { run1 "${steam[@]/%/Thief/ThiefGame/CookedPCNG}" $*; }
+function ark()    { run1 "${steam[@]/%/ARK/ShooterGame/Content}" -game=ue4.6 $*; }
+function lawbr    { run1 "${steam[@]/%/LawBreakers/ShooterGame/Content/Paks}" -game=lawbr $*; }
 
 function rund()   {	run1 "data" $*; }
 
@@ -203,9 +237,11 @@ function rund()   {	run1 "data" $*; }
 cmd=""
 buildopt=
 nobuild=
+path=0
 
 # parse our command line options
-for arg in $*; do
+for arg in "$@"; do		# using quoted $@ will allow to correctly separate arguments like [ --path="some string with spaces" -debug ]
+#	echo "ARG=$arg"
 	case $arg in
 	--help)
 		usage
@@ -222,6 +258,11 @@ for arg in $*; do
 		;;
 	--debug)
 		debugOpt=-debug
+		;;
+	--path=*)
+		path=1
+		foundPath=${arg:7}
+		DBG "--path '$foundPath'"
 		;;
 	--*)
 		cmd=${arg:2}
@@ -241,17 +282,17 @@ if [ -z "$nobuild" ]; then
 fi
 
 # find whether -path= is used or not
-path=0
 for arg in $*; do
 	case $arg in
 	-path=*)
+		DBG "'-path' is specified"
 		path=1
 		;;
 	esac
 done
 
 # execute command
-if [ $# -gt 0 ] || [ "$cmd" ]; then
+if [ $# -gt 0 ] || [ "$cmd" ] || [ $path != 0 ]; then
 	# started with arguments
 	# extract command from "--cmd" argument
 	if [ -z "$cmd" ]; then
@@ -284,7 +325,7 @@ fi
 case "" in
 
 "")
-	run ../Epic/UnrealProjects/ShooterGame/Saved/Cooked/WindowsNoEditor/ShooterGame/Content/Characters/Textures/Chr_FPS_D.uasset -game=ue4.4
+	run ../Epic/UnrealProjects/ShooterGame/Saved/Cooked/WindowsNoEditor/ShooterGame/Content/Characters/Textures/Chr_FPS_D.uasset
 #	run1 "C:/Projects/Epic/UnrealTournament4/UnrealTournament/Content" T_CH_Imm_MalcolmBody_D.uasset
 #	run1 data/3/MarvelHeroes UC__MarvelPlayer_Thor_SF.upk -game=mh thor_avengers_diff
 #	run1 data/3X/Injustice -noanim CHAR_Ares.xxx -meshes

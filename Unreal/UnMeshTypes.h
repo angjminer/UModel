@@ -1,47 +1,8 @@
-#ifndef __UNMESHTYPES_H__
-#define __UNMESHTYPES_H__
+#ifndef __UNMESH_TYPES_H__
+#define __UNMESH_TYPES_H__
 
 /*-----------------------------------------------------------------------------
-	4-byte packed normal vector
------------------------------------------------------------------------------*/
-
-// used in Bioshock and in UE3
-struct FPackedNormal
-{
-	unsigned				Data;
-
-	friend FArchive& operator<<(FArchive &Ar, FPackedNormal &N)
-	{
-		return Ar << N.Data;
-	}
-
-	operator FVector() const
-	{
-		// "x / 127.5 - 1" comes from Common.usf, TangentBias() macro
-		FVector r;
-		r.X = ( Data        & 0xFF) / 127.5f - 1;
-		r.Y = ((Data >> 8 ) & 0xFF) / 127.5f - 1;
-		r.Z = ((Data >> 16) & 0xFF) / 127.5f - 1;
-		return r;
-	}
-
-	FPackedNormal &operator=(const FVector &V)
-	{
-		Data = int((V.X + 1) * 255)
-			+ (int((V.Y + 1) * 255) << 8)
-			+ (int((V.Z + 1) * 255) << 16);
-		return *this;
-	}
-
-	float GetW() const
-	{
-		return (Data >> 24) / 127.5 - 1;
-	}
-};
-
-
-/*-----------------------------------------------------------------------------
-	Different compressed quaternion types
+	Different compressed quaternion and position types
 -----------------------------------------------------------------------------*/
 
 // really have data, when W*W == -0.0f, and sqrt(wSq) was returned -INF
@@ -76,7 +37,7 @@ SIMPLE_TYPE(FQuatFloat96NoW, float)
 // normalized quaternion with 3 16-bit fixed point fields
 struct FQuatFixed48NoW
 {
-	word			X, Y, Z;				// unsigned short, corresponds to (float+1)*32767
+	uint16			X, Y, Z;				// uint16, corresponds to (float+1)*32767
 
 	operator FQuat() const
 	{
@@ -94,12 +55,12 @@ struct FQuatFixed48NoW
 	}
 };
 
-SIMPLE_TYPE(FQuatFixed48NoW, word)
+SIMPLE_TYPE(FQuatFixed48NoW, uint16)
 
 
 struct FVectorFixed48
 {
-	word			X, Y, Z;
+	uint16			X, Y, Z;
 
 	operator FVector() const
 	{
@@ -117,8 +78,15 @@ struct FVectorFixed48
 	}
 };
 
-SIMPLE_TYPE(FVectorFixed48, word)
+SIMPLE_TYPE(FVectorFixed48, uint16)
 
+template<int Log2>
+inline float DecodeFixed48_PerTrackComponent(uint16 Value)
+{
+	const int Offset = (1 << (15 - Log2)) - 1;			// default (for Log2==7) is 255
+	const float InvFactor = 1.0f / (Offset >> Log2);	// default is 1.0f
+	return (Value - Offset) * InvFactor;
+}
 
 // normalized quaternion with 11/11/10-bit fixed point fields
 struct FQuatFixed32NoW
@@ -189,6 +157,28 @@ struct FVectorIntervalFixed32
 SIMPLE_TYPE(FVectorIntervalFixed32, unsigned)
 
 
+struct FVectorIntervalFixed32Bat4
+{
+	unsigned		X:10, Y:10, Z:10;
+
+	FVector ToVector(const FVector &Mins, const FVector &Ranges) const
+	{
+		FVector r;
+		r.X = X / 1023.0f * Ranges.X + Mins.X;
+		r.Y = Y / 1023.0f * Ranges.Y + Mins.Y;
+		r.Z = Z / 1023.0f * Ranges.Z + Mins.Z;
+		return r;
+	}
+
+	friend FArchive& operator<<(FArchive &Ar, FVectorIntervalFixed32Bat4 &V)
+	{
+		return Ar << GET_DWORD(V);
+	}
+};
+
+SIMPLE_TYPE(FVectorIntervalFixed32Bat4, unsigned)
+
+
 // Similar to FVectorIntervalFixed32 used in animation, but has different X/Y/Z bit count.
 // Used for GPU skin with compressed position. It looks like original UE3 has permitted use
 // of this data type for XBox360 and PS3 builds only.
@@ -216,7 +206,7 @@ SIMPLE_TYPE(FVectorIntervalFixed32GPU, unsigned)
 
 struct FVectorIntervalFixed48Bio
 {
-	word			X, Y, Z;
+	uint16			X, Y, Z;
 
 	FVector ToVector(const FVector &Mins, const FVector &Ranges) const
 	{
@@ -233,12 +223,12 @@ struct FVectorIntervalFixed48Bio
 	}
 };
 
-SIMPLE_TYPE(FVectorIntervalFixed48Bio, word)
+SIMPLE_TYPE(FVectorIntervalFixed48Bio, uint16)
 
 
-struct FVectorIntervalFixed64Bio
+struct FVectorIntervalFixed64
 {
-	short			X, Y, Z, W;
+	int16			X, Y, Z, W;
 
 	FVector ToVector(const FVector &Mins, const FVector &Ranges) const
 	{
@@ -249,13 +239,13 @@ struct FVectorIntervalFixed64Bio
 		return r;
 	}
 
-	friend FArchive& operator<<(FArchive &Ar, FVectorIntervalFixed64Bio &V)
+	friend FArchive& operator<<(FArchive &Ar, FVectorIntervalFixed64 &V)
 	{
 		return Ar << V.X << V.Y << V.Z << V.W;
 	}
 };
 
-SIMPLE_TYPE(FVectorIntervalFixed64Bio, word)
+SIMPLE_TYPE(FVectorIntervalFixed64, uint16)
 
 
 struct FQuatFloat32NoW
@@ -287,6 +277,27 @@ struct FQuatFloat32NoW
 SIMPLE_TYPE(FQuatFloat32NoW, unsigned)
 
 
+struct FVectorHalf
+{
+	uint16				X, Y, Z;
+
+	friend FArchive& operator<<(FArchive &Ar, FVectorHalf &v)
+	{
+		return Ar << v.X << v.Y << v.Z;
+	}
+	operator FVector() const
+	{
+		FVector r;
+		r.X = half2float(X);
+		r.Y = half2float(Y);
+		r.Z = half2float(Z);
+		return r;
+	}
+};
+
+SIMPLE_TYPE(FVectorHalf, uint16);
+
+
 #if BATMAN
 
 // This is a variant of FQuatFixed48NoW developed for Batman: Arkham Asylum. It's destination
@@ -295,7 +306,7 @@ SIMPLE_TYPE(FQuatFloat32NoW, unsigned)
 // Found the name of this compression scheme in SCE Edge library overview: "smallest 3 compression".
 struct FQuatFixed48Max
 {
-	word			data[3];				// layout: V2[15] : V1[15] : V0[15] : S[2]
+	uint16			data[3];				// layout: V2[15] : V1[15] : V0[15] : S[2]
 
 	operator FQuat() const
 	{
@@ -347,7 +358,7 @@ struct FQuatFixed48Max
 	}
 };
 
-SIMPLE_TYPE(FQuatFixed48Max, word)
+SIMPLE_TYPE(FQuatFixed48Max, uint16)
 
 #endif // BATMAN
 
@@ -357,7 +368,7 @@ SIMPLE_TYPE(FQuatFixed48Max, word)
 // similar to FQuatFixed48Max
 struct FQuatBioFixed48
 {
-	word			data[3];
+	uint16			data[3];
 
 	operator FQuat() const
 	{
@@ -396,7 +407,7 @@ struct FQuatBioFixed48
 	}
 };
 
-SIMPLE_TYPE(FQuatBioFixed48, word)
+SIMPLE_TYPE(FQuatBioFixed48, uint16)
 
 #endif // MASSEFF
 
@@ -406,7 +417,7 @@ SIMPLE_TYPE(FQuatBioFixed48, word)
 // mix of FQuatFixed48NoW and FQuatIntervalFixed32NoW
 struct FQuatIntervalFixed48NoW_Trans
 {
-	word			X, Y, Z;
+	uint16			X, Y, Z;
 
 	FQuat ToQuat(const FVector &Mins, const FVector &Ranges) const
 	{
@@ -424,7 +435,7 @@ struct FQuatIntervalFixed48NoW_Trans
 	}
 };
 
-SIMPLE_TYPE(FQuatIntervalFixed48NoW_Trans, word)
+SIMPLE_TYPE(FQuatIntervalFixed48NoW_Trans, uint16)
 
 
 struct FPackedVector_Trans
@@ -456,7 +467,7 @@ SIMPLE_TYPE(FPackedVector_Trans, unsigned)
 // mix of FQuatFixed48NoW and FQuatIntervalFixed32NoW
 struct FQuatIntervalFixed48NoW_Argo
 {
-	word			X, Y, Z;
+	uint16			X, Y, Z;
 
 	FQuat ToQuat(const FVector &Mins, const FVector &Ranges) const
 	{
@@ -474,7 +485,7 @@ struct FQuatIntervalFixed48NoW_Argo
 	}
 };
 
-SIMPLE_TYPE(FQuatIntervalFixed48NoW_Argo, word)
+SIMPLE_TYPE(FQuatIntervalFixed48NoW_Argo, uint16)
 
 
 struct FQuatFixed64NoW_Argo
@@ -502,7 +513,7 @@ SIMPLE_TYPE(FQuatFixed64NoW_Argo, int64)
 
 struct FQuatFloat48NoW_Argo
 {
-	word			X, Y, Z;
+	uint16			X, Y, Z;
 
 	operator FQuat() const
 	{
@@ -522,7 +533,7 @@ struct FQuatFloat48NoW_Argo
 	}
 };
 
-SIMPLE_TYPE(FQuatFloat48NoW_Argo, word)
+SIMPLE_TYPE(FQuatFloat48NoW_Argo, uint16)
 
 
 #endif // ARGONAUTS
@@ -532,7 +543,7 @@ SIMPLE_TYPE(FQuatFloat48NoW_Argo, word)
 
 struct FQuatDelta48NoW
 {
-	word			X, Y, Z;
+	uint16			X, Y, Z;
 
 	FQuat ToQuat(const FVector &Mins, const FVector &Ranges, const FQuat &Base) const
 	{
@@ -554,7 +565,7 @@ struct FQuatDelta48NoW
 
 struct FVectorDelta48NoW
 {
-	word			X, Y, Z;
+	uint16			X, Y, Z;
 
 	FVector ToVector(const FVector &Mins, const FVector &Ranges, const FVector &Base) const
 	{
@@ -634,7 +645,7 @@ struct FQuatPolarEncoded48
 		FQuat r;
 		float angle1, angle2;
 
-		float D0 = ( *(word*)data ) / 65535.0f;
+		float D0 = ( *(uint16*)data ) / 65535.0f;
 		r.W = 1.0f - (D0 * D0);
 
 		int data2 = *(int*) (data+2);
@@ -681,4 +692,4 @@ struct FQuatPolarEncoded48
 #endif // BORDERLANDS
 
 
-#endif // __UNMESHTYPES_H__
+#endif // __UNMESH_TYPES_H__

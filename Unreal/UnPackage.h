@@ -13,18 +13,24 @@
 #endif
 
 
+#if UNREAL4
+// Callback called when unversioned package was found.
+int UE4UnversionedPackage(int verMin, int verMax);
+#endif
+
+
 struct FGenerationInfo
 {
-	int			ExportCount, NameCount;
+	int32		ExportCount, NameCount;
 #if UNREAL3
-	int			NetObjectCount;
+	int32		NetObjectCount;
 #endif
 
 	friend FArchive& operator<<(FArchive &Ar, FGenerationInfo &I)
 	{
 		Ar << I.ExportCount << I.NameCount;
 #if UNREAL4
-		if (Ar.Game >= GAME_UE4 && Ar.ArVer >= VER_UE4_REMOVE_NET_INDEX) return Ar;
+		if (Ar.Game >= GAME_UE4_BASE && Ar.ArVer >= VER_UE4_REMOVE_NET_INDEX) return Ar;
 #endif
 #if UNREAL3
 		if (Ar.ArVer >= 322) // PACKAGE_V3
@@ -39,24 +45,39 @@ struct FGenerationInfo
 
 struct FCompressedChunk
 {
-	int			UncompressedOffset;
-	int			UncompressedSize;
-	int			CompressedOffset;
-	int			CompressedSize;
+	int32		UncompressedOffset;
+	int32		UncompressedSize;
+	int32		CompressedOffset;
+	int32		CompressedSize;
 
 	friend FArchive& operator<<(FArchive &Ar, FCompressedChunk &C)
 	{
 		guard(FCompressedChunk<<);
+
+#if MKVSDC
+		if (Ar.Game == GAME_MK && Ar.ArVer >= 677)
+		{
+			// MK X has 64-bit file offsets
+			int64 UncompressedOffset64, CompressedOffset64;
+			Ar << UncompressedOffset64 << C.UncompressedSize << CompressedOffset64 << C.CompressedSize;
+			C.UncompressedOffset = (int)UncompressedOffset64;
+			C.CompressedOffset   = (int)CompressedOffset64;
+			return Ar;
+		}
+#endif // MKVSDC
+
 		Ar << C.UncompressedOffset << C.UncompressedSize << C.CompressedOffset << C.CompressedSize;
+
 #if BULLETSTORM
 		if (Ar.Game == GAME_Bulletstorm && Ar.ArLicenseeVer >= 21)
 		{
-			int unk10;			// unused?
+			int32 unk10;		// unused? could be 0 or 1
 			Ar << unk10;
-			assert(unk10 == 1);
 		}
 #endif // BULLETSTORM
+
 		return Ar;
+
 		unguard;
 	}
 };
@@ -70,8 +91,8 @@ struct FCompressedChunk
 
 struct FEngineVersion
 {
-	word		Major, Minor, Patch;
-	int			Changelist;
+	uint16		Major, Minor, Patch;
+	int32		Changelist;
 	FString		Branch;
 
 	friend FArchive& operator<<(FArchive& Ar, FEngineVersion& V)
@@ -80,35 +101,55 @@ struct FEngineVersion
 	}
 };
 
+struct FCustomVersion
+{
+	FGuid			Key;
+	int32			Version;
+
+	friend FArchive& operator<<(FArchive& Ar, FCustomVersion& V)
+	{
+		return Ar << V.Key << V.Version;
+	}
+};
+
+struct FCustomVersionContainer
+{
+	TArray<FCustomVersion> Versions;
+
+	void Serialize(FArchive& Ar, int LegacyVersion);
+};
+
 #endif // UNREAL4
 
 
 struct FPackageFileSummary
 {
-	int			Tag;
+	uint32		Tag;
 #if UNREAL4
-	int			LegacyVersion;
+	int32		LegacyVersion;
+	bool		IsUnversioned;
+	FCustomVersionContainer CustomVersionContainer;
 #endif
-	word		FileVersion;
-	word		LicenseeVersion;
-	int			PackageFlags;
-	int			NameCount,   NameOffset;
-	int			ExportCount, ExportOffset;
-	int			ImportCount, ImportOffset;
+	uint16		FileVersion;
+	uint16		LicenseeVersion;
+	int32		PackageFlags;
+	int32		NameCount,   NameOffset;
+	int32		ExportCount, ExportOffset;
+	int32		ImportCount, ImportOffset;
 	FGuid		Guid;
 	TArray<FGenerationInfo> Generations;
 #if UNREAL3
-	int			HeadersSize;		// used by UE3 for precaching name table
+	int32		HeadersSize;		// used by UE3 for precaching name table
 	FString		PackageGroup;		// "None" or directory name
-	int			DependsOffset;		// number of items = ExportCount
-	int			f38;
-	int			f3C;
-	int			f40;
-	int			EngineVersion;
-	int			CookerVersion;
-	int			CompressionFlags;
+	int32		DependsOffset;		// number of items = ExportCount
+	int32		f38;
+	int32		f3C;
+	int32		f40;
+	int32		EngineVersion;
+	int32		CookerVersion;
+	int32		CompressionFlags;
 	TArray<FCompressedChunk> CompressedChunks;
-	int			U3unk60;
+	int32		U3unk60;
 #endif // UNREAL3
 #if UNREAL4
 	int64		BulkDataStartOffset;
@@ -124,23 +165,25 @@ struct FPackageFileSummary
 
 struct FObjectExport
 {
-	int			ClassIndex;					// object reference
-	int			SuperIndex;					// object reference
-	int			PackageIndex;				// object reference
+	int32		ClassIndex;					// object reference
+	int32		SuperIndex;					// object reference
+	int32		PackageIndex;				// object reference
 	FName		ObjectName;
-	int			SerialSize;
-	int			SerialOffset;
+	int32		SerialSize;
+	int32		SerialOffset;
 	UObject		*Object;					// not serialized, filled by object loader
-	unsigned	ObjectFlags;
+	uint32		ObjectFlags;
 #if UNREAL3
-	unsigned	ExportFlags;				// EF_* flags
+	uint32		ExportFlags;				// EF_* flags
 	#if !USE_COMPACT_PACKAGE_STRUCTS
-	unsigned	ObjectFlags2;				// really, 'int64 ObjectFlags'
-	int			Archetype;
+	uint32		ObjectFlags2;				// really, 'uint64 ObjectFlags'
+	int32		Archetype;
 //	TMap<FName, int> ComponentMap;			-- this field was removed from UE3, so serialize it as a temporaty variable when needed
-	TArray<int>	NetObjectCount;				// generations
+	TArray<int32> NetObjectCount;			// generations
 	FGuid		Guid;
-	int			PackageFlags;
+	int32		PackageFlags;
+	int32		U3unk6C;
+	int32		TemplateIndex;				// UE4
 	#endif // USE_COMPACT_PACKAGE_STRUCTS
 #endif // UNREAL3
 
@@ -152,9 +195,9 @@ struct FObjectImport
 {
 	FName		ClassPackage;
 	FName		ClassName;
-	int			PackageIndex;
+	int32		PackageIndex;
 	FName		ObjectName;
-	bool		Missing;			// not serialized
+	bool		Missing;					// not serialized
 
 	friend FArchive& operator<<(FArchive &Ar, FObjectImport &I);
 };
@@ -179,8 +222,8 @@ class UnPackage : public FArchive
 {
 	DECLARE_ARCHIVE(UnPackage, FArchive);
 public:
-	char					Filename[MAX_PACKAGE_PATH];		// full name with path and extension
-	char					Name[64];						// short name
+	const char*				Filename;			// full name with path and extension
+	const char*				Name;				// short name
 	FArchive				*Loader;
 	// package header
 	FPackageFileSummary		Summary;
@@ -193,16 +236,21 @@ public:
 #endif
 
 protected:
-	UnPackage(const char *filename, FArchive *baseLoader = NULL);
+	UnPackage(const char *filename, FArchive *baseLoader = NULL, bool silent = false);
 	~UnPackage();
 
 public:
 	// Load package using short name (without path and extension) or full path name.
 	// When the package is already loaded, this function will simply return a pointer
 	// to previously loaded UnPackage.
-	static UnPackage *LoadPackage(const char *Name);
+	static UnPackage *LoadPackage(const char *Name, bool silent = false);
 
 	static FArchive* CreateLoader(const char* filename, FArchive* baseLoader = NULL);
+
+	static const TArray<UnPackage*>& GetPackageMap()
+	{
+		return PackageMap;
+	}
 
 	// Prepare for serialization of particular object. Will open a reader if it was
 	// closed before.
@@ -250,6 +298,7 @@ public:
 
 	const char* GetObjectName(int PackageIndex) const	//?? GetExportClassName()
 	{
+		guard(UnPackage::GetObjectName);
 		if (PackageIndex < 0)
 		{
 			//?? should point to 'Class' object
@@ -264,6 +313,7 @@ public:
 		{
 			return "Class";
 		}
+		unguardf("Index=%d", PackageIndex);
 	}
 
 	int FindExport(const char *name, const char *className = NULL, int firstIndex = 0) const;
@@ -286,6 +336,15 @@ public:
 	{
 		return Loader->IsCompressed();
 	}
+#if UNREAL4
+	virtual bool ContainsEditorData() const
+	{
+		if (Game < GAME_UE4_BASE) return false;
+		if (Summary.IsUnversioned) return false;		// unversioned packages definitely has no editor data
+		if (Summary.PackageFlags & PKG_FilterEditorOnly) return false;
+		return true;
+	}
+#endif // UNREAL4
 	virtual void Serialize(void *data, int size)
 	{
 		Loader->Serialize(data, size);
@@ -324,6 +383,10 @@ public:
 	}
 
 private:
+	void LoadNameTable();
+	void LoadImportTable();
+	void LoadExportTable();
+
 	static TArray<UnPackage*> PackageMap;
 };
 

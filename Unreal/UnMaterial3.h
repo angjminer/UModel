@@ -35,6 +35,106 @@ UE3 MATERIALS TREE:
 	Unreal Engine 3 materials
 -----------------------------------------------------------------------------*/
 
+#if UNREAL4
+
+enum ETextureSourceFormat
+{
+	TSF_Invalid,
+	TSF_G8,
+	TSF_BGRA8,
+	TSF_BGRE8,
+	TSF_RGBA16,
+	TSF_RGBA16F,
+
+	// Deprecated formats:
+	TSF_RGBA8,
+	TSF_RGBE8,
+};
+
+_ENUM(ETextureSourceFormat)
+{
+	_E(TSF_Invalid),
+	_E(TSF_G8),
+	_E(TSF_BGRA8),
+	_E(TSF_BGRE8),
+	_E(TSF_RGBA16),
+	_E(TSF_RGBA16F),
+	_E(TSF_RGBA8),
+	_E(TSF_RGBE8),
+};
+
+enum ETextureCompressionSettings
+{
+	TC_Default,
+	TC_Normalmap,
+	TC_Masks,					// UE4
+	TC_Grayscale,
+	TC_Displacementmap,
+	TC_VectorDisplacementmap,
+	TC_HDR,						// UE4
+	TC_HighDynamicRange = TC_HDR,
+	TC_EditorIcon,				// UE4
+	TC_Alpha,					// UE4
+	TC_DistanceFieldFont,		// UE4
+	TC_HDR_Compressed,			// UE4
+	TC_BC7,						// UE4
+
+	// The following enum values are for UE3
+	TC_NormalmapAlpha,
+	TC_OneBitAlpha,
+	TC_NormalmapUncompressed,
+	TC_NormalmapBC5,
+	TC_OneBitMonochrome,
+	TC_SimpleLightmapModification,
+};
+
+_ENUM(ETextureCompressionSettings)
+{
+	_E(TC_Default),
+	_E(TC_Normalmap),
+	_E(TC_Masks),
+	_E(TC_Grayscale),
+	_E(TC_Displacementmap),
+	_E(TC_VectorDisplacementmap),
+	_E(TC_HDR),
+	_E(TC_HighDynamicRange),
+	_E(TC_EditorIcon),
+	_E(TC_Alpha),
+	_E(TC_DistanceFieldFont),
+	_E(TC_HDR_Compressed),
+	_E(TC_BC7),
+	_E(TC_NormalmapAlpha),
+	_E(TC_OneBitAlpha),
+	_E(TC_NormalmapUncompressed),
+	_E(TC_NormalmapBC5),
+	_E(TC_OneBitMonochrome),
+	_E(TC_SimpleLightmapModification),
+};
+
+struct FTextureSource
+{
+	DECLARE_STRUCT(FTextureSource)
+
+	int				SizeX;
+	int				SizeY;
+	int				NumSlices;
+	int				NumMips;
+	bool			bPNGCompressed;
+	ETextureSourceFormat Format;
+
+	BEGIN_PROP_TABLE
+		PROP_INT(SizeX)
+		PROP_INT(SizeY)
+		PROP_INT(NumSlices)
+		PROP_INT(NumMips)
+		PROP_BOOL(bPNGCompressed)
+		PROP_ENUM2(Format, ETextureSourceFormat)
+		PROP_DROP(Id)		// Guid
+	END_PROP_TABLE
+};
+
+#endif // UNREAL4
+
 class UTexture3 : public UUnrealMaterial	// in UE3 it is derived from USurface->UObject; real name is UTexture
 {
 	DECLARE_CLASS(UTexture3, UUnrealMaterial)
@@ -42,15 +142,23 @@ public:
 	float			UnpackMin[4];
 	float			UnpackMax[4];
 	FByteBulkData	SourceArt;
+	FTextureSource	Source;
+	ETextureCompressionSettings CompressionSettings;
 
 	UTexture3()
 	{
 		UnpackMax[0] = UnpackMax[1] = UnpackMax[2] = UnpackMax[3] = 1.0f;
+		CompressionSettings = TC_Default;
 	}
 
 	BEGIN_PROP_TABLE
 		PROP_FLOAT(UnpackMin)
 		PROP_FLOAT(UnpackMax)
+		PROP_ENUM2(CompressionSettings, ETextureCompressionSettings)
+#if UNREAL4
+		PROP_STRUC(Source, FTextureSource)
+		PROP_DROP(AssetImportData)
+#endif
 		// no properties required (all are for importing and cooking)
 		PROP_DROP(SRGB)
 		PROP_DROP(RGBE)
@@ -65,7 +173,6 @@ public:
 		PROP_DROP(bPreserveBorderG)
 		PROP_DROP(bPreserveBorderB)
 		PROP_DROP(bPreserveBorderA)
-		PROP_DROP(CompressionSettings)
 		PROP_DROP(Filter)
 		PROP_DROP(LODGroup)
 		PROP_DROP(LODBias)
@@ -239,7 +346,7 @@ _ENUM(EPixelFormat)
 	_E(PF_ASTC_10x10),
 	_E(PF_ASTC_12x12),
 #endif // UNREAL4
-#if THIEF4
+#if THIEF4 // || UNREAL4
 	_E(PF_BC7),
 #endif
 #if MASSEFF
@@ -276,14 +383,21 @@ struct FTexture2DMipMap
 
 	friend FArchive& operator<<(FArchive &Ar, FTexture2DMipMap &Mip)
 	{
+		guard(FTexture2DMipMap<<);
 #if UNREAL4
-		if (Ar.Game >= GAME_UE4)
+		if (Ar.Game >= GAME_UE4_BASE)
 		{
 			// this code is generally the same as for UE3, but it's quite simple, so keep
 			// it in separate code block
 			bool cooked = false;
 			if (Ar.ArVer >= VER_UE4_TEXTURE_SOURCE_ART_REFACTOR)
 				Ar << cooked;
+			//?? Can all 'Mip.Data.Skip(Ar)' here, but ensure any mip types will be loaded by LoadBulkTexture().
+			//?? Calling Skip() will eliminate extra seeks when interleaving reading of FTexture2DMipMap and
+			//?? bulk data which located in the same uasset, but at different position.
+			//?? To see the problem (performance problem): load data from pak, modify FPakFile, add logging of
+			//?? Seek() and decompression calls. You'll see that loading of big bulk data chinks is interleaved
+			//?? with reading 4-byte ints at different locations.
 			Mip.Data.Serialize(Ar);
 			Ar << Mip.SizeX << Mip.SizeY;
 			if (Ar.ArVer >= VER_UE4_TEXTURE_DERIVED_DATA2 && !cooked)
@@ -291,6 +405,11 @@ struct FTexture2DMipMap
 				FString DerivedDataKey;
 				Ar << DerivedDataKey;
 			}
+	#if 0
+			// Oculus demos ("Henry") can have extra int here
+			int tmp;
+			Ar << tmp;
+	#endif
 			return Ar;
 		}
 #endif // UNREAL4
@@ -303,6 +422,7 @@ struct FTexture2DMipMap
 		}
 #endif // DARKVOID
 		return Ar << Mip.SizeX << Mip.SizeY;
+		unguard;
 	}
 };
 
@@ -379,8 +499,11 @@ public:
 	void Serialize4(FArchive& Ar);
 #endif
 
-	bool LoadBulkTexture(const TArray<FTexture2DMipMap> &MipsArray, int MipIndex, const char* tfcSuffix) const;
+	const TArray<FTexture2DMipMap>* GetMipmapArray() const;
+
+	bool LoadBulkTexture(const TArray<FTexture2DMipMap> &MipsArray, int MipIndex, const char* tfcSuffix, bool verbose) const;
 	virtual bool GetTextureData(CTextureData &TexData) const;
+	virtual void ReleaseTextureData() const;
 #if RENDERING
 	virtual bool Upload();
 	virtual bool Bind();
@@ -663,7 +786,7 @@ public:
 	{
 		Super::Serialize(Ar);
 #if UNREAL4
-		if (Ar.Game >= GAME_UE4)
+		if (Ar.Game >= GAME_UE4_BASE)
 		{
 			// UE4 has complex FMaterialResource format, so avoid reading anything here, but
 			// scan package's imports for UTexture objects instead
@@ -696,8 +819,20 @@ public:
 			return;
 		}
 #endif // BIOSHOCK3
+#if MKVSDC
+		if (Ar.Game == GAME_MK)
+		{
+			// MK X has version 677, but different format of UMaterial
+			DROP_REMAINING_DATA(Ar);
+			return;
+		}
+#endif // MKVSDC
+#if METRO_CONF
+		if (Ar.Game == GAME_MetroConflict && Ar.ArLicenseeVer >= 21) goto mask;
+#endif
 		if (Ar.ArVer >= 858)
 		{
+		mask:
 			int unkMask;		// default 1
 			Ar << unkMask;
 		}
@@ -728,18 +863,54 @@ public:
 #if RENDERING
 	virtual void SetupGL();
 	virtual void GetParams(CMaterialParams &Params) const;
+	virtual void AppendReferencedTextures(TArray<UUnrealMaterial*>& OutTextures, bool onlyRendered) const;
 	virtual bool IsTranslucent() const;
 #endif
 };
+
+#if UNREAL4
+
+struct FMaterialInstanceBasePropertyOverrides
+{
+	DECLARE_STRUCT(FMaterialInstanceBasePropertyOverrides);
+
+	bool			bOverride_BlendMode;
+	EBlendMode		BlendMode;
+
+	bool			bOverride_TwoSided;
+	bool			TwoSided;
+
+	BEGIN_PROP_TABLE
+		PROP_BOOL(bOverride_BlendMode)
+		PROP_ENUM2(BlendMode, EBlendMode)
+		PROP_BOOL(bOverride_TwoSided)
+		PROP_BOOL(TwoSided)
+	END_PROP_TABLE
+
+	FMaterialInstanceBasePropertyOverrides()
+	:	bOverride_BlendMode(false)
+	,	BlendMode(BLEND_Opaque)
+	,	bOverride_TwoSided(false)
+	,	TwoSided(0)
+	{}
+};
+
+#endif // UNREAL4
 
 class UMaterialInstance : public UMaterialInterface
 {
 	DECLARE_CLASS(UMaterialInstance, UMaterialInterface)
 public:
 	UUnrealMaterial	*Parent;				// UMaterialInterface*
+#if UNREAL4
+	FMaterialInstanceBasePropertyOverrides BasePropertyOverrides;
+#endif
 
 	BEGIN_PROP_TABLE
 		PROP_OBJ(Parent)
+#if UNREAL4
+		PROP_STRUC(BasePropertyOverrides, FMaterialInstanceBasePropertyOverrides)
+#endif
 		PROP_DROP(PhysMaterial)
 		PROP_DROP(bHasStaticPermutationResource)
 		PROP_DROP(ReferencedTextures)		// this is a textures from Parent plus own overrided textures
@@ -832,6 +1003,7 @@ public:
 #if RENDERING
 	virtual void SetupGL();
 	virtual void GetParams(CMaterialParams &Params) const;
+	virtual void AppendReferencedTextures(TArray<UUnrealMaterial*>& OutTextures, bool onlyRendered) const;
 	virtual bool IsTranslucent() const
 	{
 		return Parent ? Parent->IsTranslucent() : false;
@@ -904,9 +1076,16 @@ public:
 #define REGISTER_MATERIAL_ENUMS_U3		\
 	REGISTER_ENUM(EPixelFormat)			\
 	REGISTER_ENUM(ETextureAddress)		\
+	REGISTER_ENUM(ETextureCompressionSettings) \
 	REGISTER_ENUM(EBlendMode)			\
-	REGISTER_ENUM(EMobileSpecularMask)
+	REGISTER_ENUM(EMobileSpecularMask)	\
 
+#define REGISTER_MATERIAL_CLASSES_U4	\
+	REGISTER_CLASS(FTextureSource)		\
+	REGISTER_CLASS(FMaterialInstanceBasePropertyOverrides)
+
+#define REGISTER_MATERIAL_ENUMS_U4		\
+	REGISTER_ENUM(ETextureSourceFormat)
 
 #endif // UNREAL3
 

@@ -28,16 +28,18 @@ void UMeshAnimation::ConvertAnims()
 
 	// TrackBoneNames
 	int numBones = RefBones.Num();
-	AnimSet->TrackBoneNames.Add(numBones);
+	AnimSet->TrackBoneNames.AddUninitialized(numBones);
 	for (i = 0; i < numBones; i++)
 		AnimSet->TrackBoneNames[i] = RefBones[i].Name;
 
 	// Sequences
 	int numSeqs = AnimSeqs.Num();
-	AnimSet->Sequences.Add(numSeqs);
+	AnimSet->Sequences.Empty(numSeqs);
 	for (i = 0; i < numSeqs; i++)
 	{
-		CAnimSequence &S = AnimSet->Sequences[i];
+		CAnimSequence &S = *new CAnimSequence;
+		AnimSet->Sequences.Add(&S);
+
 		const FMeshAnimSeq &Src = AnimSeqs[i];
 		const MotionChunk  &M   = Moves[i];
 
@@ -47,7 +49,7 @@ void UMeshAnimation::ConvertAnims()
 		S.Rate      = Src.Rate;
 
 		// S.Tracks
-		S.Tracks.Add(numBones);
+		S.Tracks.AddZeroed(numBones);
 		for (j = 0; j < numBones; j++)
 		{
 			CAnimTrack &T = S.Tracks[j];
@@ -75,7 +77,7 @@ void UMeshAnimation::ConvertAnims()
 // quaternion with 4 16-bit fixed point fields
 struct FQuatComp
 {
-	short			X, Y, Z, W;				// signed short, corresponds to float*32767
+	int16			X, Y, Z, W;				// signed int16, corresponds to float*32767
 
 	inline operator FQuat() const
 	{
@@ -101,12 +103,12 @@ struct FQuatComp
 	}
 };
 
-SIMPLE_TYPE(FQuatComp, short)
+SIMPLE_TYPE(FQuatComp, int16)
 
 // normalized quaternion with 3 16-bit fixed point fields
 struct FQuatComp2
 {
-	short			X, Y, Z;				// signed short, corresponds to float*32767
+	int16			X, Y, Z;				// signed int16, corresponds to float*32767
 
 	inline operator FQuat() const
 	{
@@ -126,11 +128,11 @@ struct FQuatComp2
 	}
 };
 
-SIMPLE_TYPE(FQuatComp2, short)
+SIMPLE_TYPE(FQuatComp2, int16)
 
 struct FVectorComp
 {
-	short			X, Y, Z;
+	int16			X, Y, Z;
 
 	inline operator FVector() const
 	{
@@ -147,7 +149,7 @@ struct FVectorComp
 	}
 };
 
-SIMPLE_TYPE(FVectorComp, short)
+SIMPLE_TYPE(FVectorComp, int16)
 
 
 #define SCELL_TRACK(Name,Quat,Pos,Time)						\
@@ -171,17 +173,17 @@ struct Name													\
 	}														\
 };
 
-SCELL_TRACK(FixedPointTrack, FQuatComp,  FQuatComp,   word)
-SCELL_TRACK(Quat16Track,     FQuatComp2, FVector,     word)	// all types are "large"
-SCELL_TRACK(FixPosTrack,     FQuatComp2, FVectorComp, word)	// "small" KeyPos
-SCELL_TRACK(FixTimeTrack,    FQuatComp2, FVector,     byte)	// "small" KeyTime
-SCELL_TRACK(FixPosTimeTrack, FQuatComp2, FVectorComp, byte)	// "small" KeyPos and KeyTime
+SCELL_TRACK(FixedPointTrack, FQuatComp,  FQuatComp,   uint16)
+SCELL_TRACK(Quat16Track,     FQuatComp2, FVector,     uint16)	// all types are "large"
+SCELL_TRACK(FixPosTrack,     FQuatComp2, FVectorComp, uint16)	// "small" KeyPos
+SCELL_TRACK(FixTimeTrack,    FQuatComp2, FVector,     uint8)    // "small" KeyTime
+SCELL_TRACK(FixPosTimeTrack, FQuatComp2, FVectorComp, uint8)    // "small" KeyPos and KeyTime
 
 
 void AnalogTrack::SerializeSCell(FArchive &Ar)
 {
 	TArray<FQuatComp> KeyQuat2;
-	TArray<word>      KeyTime2;
+	TArray<uint16>      KeyTime2;
 	Ar << KeyQuat2 << KeyPos << KeyTime2;
 	// copy with conversion
 	CopyArray(KeyQuat, KeyQuat2);
@@ -234,7 +236,7 @@ template<class T> struct MotionChunkCompress : public MotionChunkCompressBase
 		CopyArray(D.BoneIndices, BoneIndices);
 		int numAnims = AnimTracks.Num();
 		D.AnimTracks.Empty(numAnims);
-		D.AnimTracks.Add(numAnims);
+		D.AnimTracks.AddZeroed(numAnims);
 		for (int i = 0; i < numAnims; i++)
 			AnimTracks[i].Decompress(D.AnimTracks[i]);
 		// RootTrack is unused ...
@@ -291,7 +293,7 @@ void UMeshAnimation::SerializeSCell(FArchive &Ar)
 				{
 					// 1st iteration, prepare Moves[] array
 					Moves.Empty(Count);
-					Moves.Add(Count);
+					Moves.AddZeroed(Count);
 				}
 				// decompress current track
 				M->Decompress(Moves[i]);
@@ -342,7 +344,7 @@ void UMeshAnimation::SerializeLineageMoves(FArchive &Ar)
 
 struct FVectorShortSWRC
 {
-	short					X, Y, Z;
+	int16					X, Y, Z;
 
 	friend FArchive& operator<<(FArchive &Ar, FVectorShortSWRC &V)
 	{
@@ -383,10 +385,10 @@ struct FVectorShortSWRC
 
 	FQuat ToFQuat() const
 	{
-		static const float s = 0.70710678118f / 32767;	// short -> range(sqrt(2))
-		float A = short(X & 0xFFFE) * s;
-		float B = short(Y & 0xFFFE) * s;
-		float C = short(Z & 0xFFFE) * s;
+		static const float s = 0.70710678118f / 32767;	// int16 -> range(sqrt(2))
+		float A = int16(X & 0xFFFE) * s;
+		float B = int16(Y & 0xFFFE) * s;
+		float C = int16(Z & 0xFFFE) * s;
 		float D = sqrt(1.0f - (A*A + B*B + C*C));
 		if (Z & 1) D = -D;
 		FQuat r;
@@ -404,7 +406,7 @@ struct FVectorShortSWRC
 	}
 };
 
-SIMPLE_TYPE(FVectorShortSWRC, short)
+SIMPLE_TYPE(FVectorShortSWRC, int16)
 
 
 void AnalogTrack::SerializeSWRC(FArchive &Ar)
@@ -414,7 +416,7 @@ void AnalogTrack::SerializeSWRC(FArchive &Ar)
 	float					 PosScale;
 	TArray<FVectorShortSWRC> PosTrack;		// scaled by PosScale
 	TArray<FVectorShortSWRC> RotTrack;
-	TArray<byte>			 TimeTrack;		// frame duration
+	TArray<uint8>			 TimeTrack;		// frame duration
 
 	Ar << PosScale << PosTrack << RotTrack << TimeTrack;
 
@@ -424,7 +426,7 @@ void AnalogTrack::SerializeSWRC(FArchive &Ar)
 	int NumKeys, i;
 	NumKeys = TimeTrack.Num();
 	KeyTime.Empty(NumKeys);
-	KeyTime.Add(NumKeys);
+	KeyTime.AddUninitialized(NumKeys);
 	int Time = 0;
 	for (i = 0; i < NumKeys; i++)
 	{
@@ -435,7 +437,7 @@ void AnalogTrack::SerializeSWRC(FArchive &Ar)
 	// rotation track
 	NumKeys = RotTrack.Num();
 	KeyQuat.Empty(NumKeys);
-	KeyQuat.Add(NumKeys);
+	KeyQuat.AddUninitialized(NumKeys);
 	for (i = 0; i < NumKeys; i++)
 	{
 		FQuat Q;
@@ -451,7 +453,7 @@ void AnalogTrack::SerializeSWRC(FArchive &Ar)
 	// translation track
 	NumKeys = PosTrack.Num();
 	KeyPos.Empty(NumKeys);
-	KeyPos.Add(NumKeys);
+	KeyPos.AddUninitialized(NumKeys);
 	for (i = 0; i < NumKeys; i++)
 		KeyPos[i] = PosTrack[i].ToFVector(PosScale);
 
@@ -470,9 +472,9 @@ void UMeshAnimation::SerializeSWRCAnims(FArchive &Ar)
 	Ar << AR_INDEX(NumAnims);		// TArray.Num
 	// prepare arrays
 	Moves.Empty(NumAnims);
-	Moves.Add(NumAnims);
+	Moves.AddZeroed(NumAnims);
 	AnimSeqs.Empty(NumAnims);
-	AnimSeqs.Add(NumAnims);
+	AnimSeqs.AddZeroed(NumAnims);
 	// serialize items
 	for (int i = 0; i < NumAnims; i++)
 	{
@@ -500,7 +502,7 @@ void UMeshAnimation::SerializeSWRCAnims(FArchive &Ar)
 
 struct FVectorShortUC1
 {
-	short					X, Y, Z;
+	int16					X, Y, Z;
 
 	friend FArchive& operator<<(FArchive &Ar, FVectorShortUC1 &V)
 	{
@@ -518,11 +520,11 @@ struct FVectorShortUC1
 	}
 };
 
-SIMPLE_TYPE(FVectorShortUC1, short)
+SIMPLE_TYPE(FVectorShortUC1, int16)
 
 struct FQuatShortUC1
 {
-	short					X, Y, Z, W;
+	int16					X, Y, Z, W;
 
 	friend FArchive& operator<<(FArchive &Ar, FQuatShortUC1 &Q)
 	{
@@ -541,7 +543,7 @@ struct FQuatShortUC1
 	}
 };
 
-SIMPLE_TYPE(FQuatShortUC1, short)
+SIMPLE_TYPE(FQuatShortUC1, int16)
 
 
 void AnalogTrack::SerializeUC1(FArchive &Ar)
@@ -582,7 +584,7 @@ public:
 
 		assert(DataAr.IsLoading && CountAr.IsLoading);
 		// serialize memory size from "CountAr"
-		int DataSize;
+		unsigned DataSize;
 		CountAr << DataSize;
 		// compute items count
 		int Count = DataSize / sizeof(T);
@@ -591,7 +593,7 @@ public:
 		Empty(Count);
 		DataCount = Count;
 		// serialize items from "DataAr"
-		T* Item = (T*)GetData();
+		T* Item = GetData();
 		while (Count > 0)
 		{
 			DataAr << *Item;
@@ -647,7 +649,7 @@ struct FlexTrackStatic : public FlexTrackBase
 		{
 			FVector pos;
 			Ar << pos;
-			KeyPos.AddItem(pos);
+			KeyPos.Add(pos);
 		}
 	}
 #if UC2
@@ -662,7 +664,7 @@ struct FlexTrackStatic : public FlexTrackBase
 
 	virtual void Decompress(AnalogTrack &T)
 	{
-		T.KeyQuat.AddItem(KeyQuat);
+		T.KeyQuat.Add(KeyQuat);
 		CopyArray(T.KeyPos, KeyPos);
 	}
 };
@@ -670,7 +672,7 @@ struct FlexTrackStatic : public FlexTrackBase
 struct FlexTrack48 : public FlexTrackBase
 {
 	TArray<FQuatFixed48NoW>	KeyQuat;
-	TArray<short>		KeyTime;
+	TArray<int16>		KeyTime;
 	TArray<FVector>		KeyPos;
 
 	virtual void Serialize(FArchive &Ar)
@@ -697,7 +699,7 @@ struct FlexTrack48 : public FlexTrackBase
 struct FlexTrack48RotOnly : public FlexTrackBase
 {
 	TArray<FQuatFixed48NoW>	KeyQuat;
-	TArray<short>		KeyTime;
+	TArray<int16>		KeyTime;
 	FVector				KeyPos;
 
 	virtual void Serialize(FArchive &Ar)
@@ -710,7 +712,7 @@ struct FlexTrack48RotOnly : public FlexTrackBase
 		CopyArray(T.KeyQuat, KeyQuat);
 		CopyArray(T.KeyTime, KeyTime);
 		T.KeyPos.Empty(1);
-		T.KeyPos.AddItem(KeyPos);
+		T.KeyPos.Add(KeyPos);
 	}
 };
 
@@ -720,7 +722,7 @@ struct FlexTrack48RotOnly : public FlexTrackBase
 struct FlexTrack5 : public FlexTrackBase
 {
 	TArray<FQuatFixed48NoW>	KeyQuat;
-	TArray<short>		KeyTime;
+	TArray<int16>		KeyTime;
 
 	virtual void Serialize(FArchive &Ar)
 	{}
@@ -758,8 +760,8 @@ struct FlexTrack6 : public FlexTrackBase
 
 	virtual void Decompress(AnalogTrack &T)
 	{
-		T.KeyQuat.AddItem(KeyQuat);
-		T.KeyPos.AddItem(KeyPos);
+		T.KeyQuat.Add(KeyQuat);
+		T.KeyPos.Add(KeyPos);
 	}
 };
 
@@ -781,7 +783,7 @@ struct FlexTrack7 : public FlexTrackBase
 
 	virtual void Decompress(AnalogTrack &T)
 	{
-		T.KeyQuat.AddItem(KeyQuat);
+		T.KeyQuat.Add(KeyQuat);
 	}
 };
 
@@ -799,7 +801,7 @@ FlexTrackBase *CreateFlexTrack(int TrackType)
 		return new FlexTrackStatic;
 
 //	case 2:
-//		// This type uses structure with TArray<FVector>, TArray<FQuatFloat96NoW> and TArray<short>.
+//		// This type uses structure with TArray<FVector>, TArray<FQuatFloat96NoW> and TArray<int16>.
 //		// It's Footprint() method returns 0, GetRotPos() does nothing, but serializer is working.
 //		appError("Unsupported FlexTrack type=2");
 
@@ -863,7 +865,7 @@ void SerializeFlexTracks(FArchive &Ar, MotionChunk &M)
 	int numTracks = FT.Num();
 	if (!numTracks) return;
 	M.AnimTracks.Empty(numTracks);
-	M.AnimTracks.Add(numTracks);
+	M.AnimTracks.AddZeroed(numTracks);
 	for (int i = 0; i < numTracks; i++)
 		FT[i].Track->Decompress(M.AnimTracks[i]);
 
@@ -932,7 +934,7 @@ bool UMeshAnimation::SerializeUE2XMoves(FArchive &Ar)
 	assert(Ar.IsLoading);
 
 	// read FByteBuffer
-	byte *BufferData = NULL;
+	uint8 *BufferData = NULL;
 	int DataSize;
 	int DataFlag;
 	Ar << DataSize;
@@ -960,7 +962,7 @@ bool UMeshAnimation::SerializeUE2XMoves(FArchive &Ar)
 #endif
 	if (!DataFlag && DataSize)
 	{
-		BufferData = (byte*)appMalloc(DataSize);
+		BufferData = (uint8*)appMalloc(DataSize);
 		Ar.Serialize(BufferData, DataSize);
 	}
 	TArray<MotionChunkUC2> Moves2;
@@ -971,7 +973,7 @@ bool UMeshAnimation::SerializeUE2XMoves(FArchive &Ar)
 	// serialize Moves2 and copy Moves2 to Moves
 	int numMoves = Moves2.Num();
 	Moves.Empty(numMoves);
-	Moves.Add(numMoves);
+	Moves.AddZeroed(numMoves);
 	for (int mi = 0; mi < numMoves; mi++)
 	{
 		MotionChunkUC2 &M = Moves2[mi];
@@ -981,7 +983,7 @@ bool UMeshAnimation::SerializeUE2XMoves(FArchive &Ar)
 		int numATracks = M.AnimTracks.Num();
 		if (numATracks)
 		{
-			DM.AnimTracks.Add(numATracks);
+			DM.AnimTracks.AddZeroed(numATracks);
 			for (int ti = 0; ti < numATracks; ti++)
 			{
 				AnalogTrack &A = DM.AnimTracks[ti];
@@ -998,7 +1000,7 @@ bool UMeshAnimation::SerializeUE2XMoves(FArchive &Ar)
 		int numFTracks = M.FlexTracks.Num();
 		if (numFTracks)
 		{
-			DM.AnimTracks.Add(numFTracks);
+			DM.AnimTracks.AddZeroed(numFTracks);
 			for (int ti = 0; ti < numFTracks; ti++)
 			{
 				FlexTrackBase *Track = M.FlexTracks[ti].Track;

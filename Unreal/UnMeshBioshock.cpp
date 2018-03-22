@@ -3,15 +3,15 @@
 #include "UnMesh2.h"
 #include "UnMeshTypes.h"		// for FPackedNormal
 #include "UnHavok.h"
-#include "UnPackage.h"			// to get "Platform"
 
-#include "UnMaterial2.h"		//!! engine dependency
+#include "UnMaterial2.h"		// serialize UMaterial*
 
-#include "TypeConvert.h"		//?? for CQuat.Conjugate() only?
+#include "MeshCommon.h"			// CPackedNormal stuff
+#include "TypeConvert.h"		// CVT macros
 
 #if BIOSHOCK
 
-#define XBOX_HACK	1			// disable XBox360 Havok parsing (endian problems)
+#define XBOX_HACK	1			// disable XBox360 Havok parsing (endianness problems)
 
 /*-----------------------------------------------------------------------------
 	Bioshock 1 & 2 Havok structures
@@ -46,7 +46,7 @@ struct hkaSkeleton5 : hkSkeleton		// hkaSkeleton
 // classes without implementation
 class hkRagdollInstance;
 class hkSkeletonMapper;
-class ap4AnimationPackageAnimation;		//?? implement later
+class ap4AnimationPackageAnimation;
 
 struct ap4AnimationPackageRoot
 {
@@ -77,47 +77,79 @@ struct ap5AnimationPackageRoot
 	Bioshock's USkeletalMesh
 -----------------------------------------------------------------------------*/
 
-//!! NOTE: Bioshock uses EXACTLY the same rigid/smooth vertex data as older UE3.
+//!! NOTE: Bioshock uses EXACTLY the same rigid/soft vertex data as older UE3.
 //!! Should separate vertex declarations into h-file and use here
 struct FRigidVertexBio	//?? same layout as FRigidVertex3
 {
 	FVector				Pos;
-	int					Normal[3];
+	FPackedNormal		Normal[3];
 	FMeshUVFloat		UV;
 	byte				BoneIndex;
 
 	friend FArchive& operator<<(FArchive &Ar, FRigidVertexBio &V)
 	{
-		Ar << V.Pos << V.Normal[0] << V.Normal[1] << V.Normal[2];
+		Ar << V.Pos;
+		if (Ar.ArVer < 142)
+		{
+			Ar << V.Normal[0] << V.Normal[1] << V.Normal[2];
+		}
+		else
+		{
+			// Bioshock 1 Remastered
+			for (int i = 0; i < 3; i++)
+			{
+				FVector UnpNormal;
+				Ar << UnpNormal;
+				CPackedNormal PN;
+				Pack(PN, CVT(UnpNormal));
+				V.Normal[i] = CVT(PN);
+			}
+		}
 		Ar << V.UV;
 		Ar << V.BoneIndex;
 		return Ar;
 	}
 };
 
-struct FSmoothVertexBio	//?? same layout as FSmoothVertex3 (old version)
+struct FSoftVertexBio	//?? same layout as FSoftVertex3 (old version)
 {
 	FVector				Pos;
-	int					Normal[3];
+	FPackedNormal		Normal[3];
 	FMeshUVFloat		UV;
 	byte				BoneIndex[4];
 	byte				BoneWeight[4];
 
-	friend FArchive& operator<<(FArchive &Ar, FSmoothVertexBio &V)
+	friend FArchive& operator<<(FArchive &Ar, FSoftVertexBio &V)
 	{
-		int i;
-		Ar << V.Pos << V.Normal[0] << V.Normal[1] << V.Normal[2] << V.UV;
-		for (i = 0; i < 4; i++)
+		Ar << V.Pos;
+		if (Ar.ArVer < 142)
+		{
+			Ar << V.Normal[0] << V.Normal[1] << V.Normal[2];
+		}
+		else
+		{
+			// Bioshock 1 Remastered
+			for (int i = 0; i < 3; i++)
+			{
+				FVector UnpNormal;
+				Ar << UnpNormal;
+				CPackedNormal PN;
+				Pack(PN, CVT(UnpNormal));
+				V.Normal[i] = CVT(PN);
+			}
+		}
+		Ar << V.UV;
+		for (int i = 0; i < 4; i++)
 			Ar << V.BoneIndex[i] << V.BoneWeight[i];
 		return Ar;
 	}
 };
 
-// Bioshock 2 replacement of FSmoothVertex and FRigidVertex
+// Bioshock 2 replacement of FSoftVertex and FRigidVertex
 struct FSkelVertexBio2
 {
 	FVector				Pos;
-	int					Normal[3];		// FVectorComp (FVector as 4 bytes)
+	FPackedNormal		Normal[3];		// FVectorComp (FVector as 4 bytes)
 	FMeshUVHalf			UV;
 	int					Pad;
 
@@ -143,14 +175,14 @@ struct FSkelInfluenceBio2
 
 struct FBioshockUnk1
 {
-	TArray<short>		f0;
-	TArray<short>		fC;
-	TArray<short>		f18;
-	TArray<short>		f24;
-	TArray<short>		f30;
-	TArray<short>		f3C;
-	TArray<short>		f48;
-	TArray<short>		f54;
+	TArray<int16>		f0;
+	TArray<int16>		fC;
+	TArray<int16>		f18;
+	TArray<int16>		f24;
+	TArray<int16>		f30;
+	TArray<int16>		f3C;
+	TArray<int16>		f48;
+	TArray<int16>		f54;
 
 	friend FArchive& operator<<(FArchive &Ar, FBioshockUnk1 &S)
 	{
@@ -272,11 +304,11 @@ struct FMeshNormalBio
 
 struct FStaticLODModelBio
 {
-	TArray<FSkelMeshSection> Sections;			// standard format, but 1 section = 1 material (rigid and smooth verts
+	TArray<FSkelMeshSection> Sections;			// standard format, but 1 section = 1 material (rigid and soft verts
 												// are placed into a single section)
-	TArray<short>			Bones;
+	TArray<int16>			Bones;
 	FRawIndexBuffer			IndexBuffer;
-	TArray<FSmoothVertexBio> SmoothVerts;
+	TArray<FSoftVertexBio>	SoftVerts;
 	TArray<FRigidVertexBio>	RigidVerts;
 	TArray<FBioshockUnk1>	f58;
 	float					f64;
@@ -300,7 +332,7 @@ struct FStaticLODModelBio
 		if (t3_hdrSV < 4)
 		{
 			// Bioshock 1
-			Ar << Lod.SmoothVerts << Lod.RigidVerts;
+			Ar << Lod.SoftVerts << Lod.RigidVerts;
 		}
 		else
 		{
@@ -312,13 +344,13 @@ struct FStaticLODModelBio
 			Ar << NumRigidVerts << Verts << Infs;
 			// convert to old version
 			int NumVerts = Verts.Num();
-			Lod.SmoothVerts.Empty(NumVerts);
-			Lod.SmoothVerts.Add(NumVerts);
+			Lod.SoftVerts.Empty(NumVerts);
+			Lod.SoftVerts.AddUninitialized(NumVerts);
 			for (int i = 0; i < NumVerts; i++)
 			{
 				const FSkelVertexBio2 &V1    = Verts[i];
 				const FSkelInfluenceBio2 &V2 = Infs[i];
-				FSmoothVertexBio &V = Lod.SmoothVerts[i];
+				FSoftVertexBio &V = Lod.SoftVerts[i];
 				V.Pos = V1.Pos;
 				V.Normal[0] = V1.Normal[0];
 				V.Normal[1] = V1.Normal[1];
@@ -339,7 +371,7 @@ struct FStaticLODModelBio
 		Ar << Lod.VertInfluences << Lod.Wedges << Lod.Faces << Lod.Points << Lod.Normals;
 #if 0
 		appPrintf("sm:%d rig:%d idx:%d bones:%d 58:%d 64:%g 68:%g 6C:%d 70:%d 74:%d 78:%d\n",
-			Lod.SmoothVerts.Num(), Lod.RigidVerts.Num(), Lod.IndexBuffer.Indices.Num(), Lod.Bones.Num(), Lod.f58.Num(),
+			Lod.SoftVerts.Num(), Lod.RigidVerts.Num(), Lod.IndexBuffer.Indices.Num(), Lod.Bones.Num(), Lod.f58.Num(),
 			Lod.f64, Lod.f68, Lod.f6C, Lod.f70, Lod.f74, Lod.f78);
 		appPrintf("inf:%d wedg:%d fac:%d pts:%d norm:%d\n", Lod.VertInfluences.Num(), Lod.Wedges.Num(), Lod.Faces.Num(), Lod.Points.Num(), Lod.Normals.Num());
 		int j;
@@ -358,35 +390,38 @@ struct FStaticLODModelBio
 	}
 };
 
-static bool CompareCompNormals(int Normal1, int Normal2)
+static bool CompareCompNormals(FPackedNormal Normal1, FPackedNormal Normal2)
 {
+	uint32 N1 = Normal1.Data;
+	uint32 N2 = Normal2.Data;
 	for (int i = 0; i < 3; i++)
 	{
-		char b1 = Normal1 & 0xFF;
-		char b2 = Normal2 & 0xFF;
+		char b1 = N1 & 0xFF;
+		char b2 = N2 & 0xFF;
 		if (abs(b1 - b2) > 10) return false;
-		Normal1 >>= 8;
-		Normal2 >>= 8;
+		N1 >>= 8;
+		N2 >>= 8;
 	}
 	return true;
 }
 
 // partially based on FStaticLODModel::RestoreMesh3()
 //!! convert directly to CSkeletalMesh, eliminate CompareCompNormals()
+//!! also this will allow to use normals and tangents from mesh (currently dropped due to UE2 limitations)
 void FStaticLODModel::RestoreMeshBio(const USkeletalMesh &Mesh, const FStaticLODModelBio &Lod)
 {
 	guard(FStaticLODModel::RestoreMeshBio);
 
-	int NumVertices = Lod.SmoothVerts.Num() + Lod.RigidVerts.Num();
+	int NumVertices = Lod.SoftVerts.Num() + Lod.RigidVerts.Num();
 
 	// prepare arrays
-	TArray<int> PointNormals;
+	TArray<FPackedNormal> PointNormals;
 	Points.Empty        (NumVertices);
 	PointNormals.Empty  (NumVertices);
 	Wedges.Empty        (NumVertices);
 	VertInfluences.Empty(NumVertices * 4);
 
-	int Vert, j;
+	int Vert;
 
 	guard(RigidVerts);
 	for (Vert = 0; Vert < Lod.RigidVerts.Num(); Vert++)
@@ -403,9 +438,9 @@ void FStaticLODModel::RestoreMeshBio(const USkeletalMesh &Mesh, const FStaticLOD
 		if (PointIndex == INDEX_NONE)
 		{
 			// point was not found - create it
-			PointIndex = Points.Add();
+			PointIndex = Points.AddUninitialized();
 			Points[PointIndex] = V.Pos;
-			PointNormals.AddItem(V.Normal[0]);
+			PointNormals.Add(V.Normal[0]);
 			// add influence
 			FVertInfluence *Inf = new(VertInfluences) FVertInfluence;
 			Inf->PointIndex = PointIndex;
@@ -419,10 +454,10 @@ void FStaticLODModel::RestoreMeshBio(const USkeletalMesh &Mesh, const FStaticLOD
 	}
 	unguard;
 
-	guard(SmoothVerts);
-	for (Vert = 0; Vert < Lod.SmoothVerts.Num(); Vert++)
+	guard(SoftVerts);
+	for (Vert = 0; Vert < Lod.SoftVerts.Num(); Vert++)
 	{
-		const FSmoothVertexBio &V = Lod.SmoothVerts[Vert];
+		const FSoftVertexBio &V = Lod.SoftVerts[Vert];
 		// find the same point in previous items
 		int PointIndex = -1;	// start with 0, see below
 		while (true)
@@ -435,9 +470,9 @@ void FStaticLODModel::RestoreMeshBio(const USkeletalMesh &Mesh, const FStaticLOD
 		if (PointIndex == INDEX_NONE)
 		{
 			// point was not found - create it
-			PointIndex = Points.Add();
+			PointIndex = Points.AddUninitialized();
 			Points[PointIndex] = V.Pos;
-			PointNormals.AddItem(V.Normal[0]);
+			PointNormals.Add(V.Normal[0]);
 			// add influences
 //			appPrintf("point[%d]: %d/%d  %d/%d  %d/%d  %d/%d\n", PointIndex, V.BoneIndex[0], V.BoneWeight[0],
 //				V.BoneIndex[1], V.BoneWeight[1], V.BoneIndex[2], V.BoneWeight[2], V.BoneIndex[3], V.BoneWeight[3]);
@@ -469,7 +504,7 @@ void FStaticLODModel::RestoreMeshBio(const USkeletalMesh &Mesh, const FStaticLOD
 	for (Sec = 0; Sec < Lod.Sections.Num(); Sec++)
 	{
 		const FSkelMeshSection &S = Lod.Sections[Sec];
-		FSkelMeshSection *Dst = new (SmoothSections) FSkelMeshSection;
+		FSkelMeshSection *Dst = new (SoftSections) FSkelMeshSection;
 		int MaterialIndex = S.MaterialIndex;
 		Dst->MaterialIndex = MaterialIndex;
 		Dst->FirstFace     = Faces.Num();
@@ -505,7 +540,7 @@ void USkeletalMesh::SerializeBioshockMesh(FArchive &Ar)
 {
 	guard(USkeletalMesh::SerializeBioshock);
 
-	UPrimitive::Serialize(Ar);
+	UPrimitive::Serialize(Ar);				// Bounding box and sphere
 	TRIBES_HDR(Ar, 0);
 
 	float					unk90, unk94;
@@ -528,13 +563,13 @@ void USkeletalMesh::SerializeBioshockMesh(FArchive &Ar)
 	Ar << RefSkeleton << Animation << SkeletalDepth << AttachAliases << AttachBoneNames << AttachCoords;
 	Ar << bioLODModels;
 	Ar << fCC;
-	Ar << Points << Wedges << Triangles << VertInfluences;
+	Ar << Points << Wedges << Triangles << VertInfluences;	//?? check: Bio1_Remastered serializes FMeshFace instead of VTriangle here (see 'Triangles')
 	Ar << CollapseWedge << f1C8;
 	Ar << bioNormals;
 
 	SkipLazyArray(Ar);	// FMeshFace	f254
 	SkipLazyArray(Ar);	// FMeshWedge	f234
-	SkipLazyArray(Ar);	// short		f274
+	SkipLazyArray(Ar);	// int16		f274
 
 	if (t3_hdrSV >= 6 && Ar.ArLicenseeVer != 57) // not Bioshock 2 MP
 	{
@@ -567,12 +602,12 @@ void USkeletalMesh::SerializeBioshockMesh(FArchive &Ar)
 	// convert LODs
 	int i;
 	LODModels.Empty(bioLODModels.Num());
-	LODModels.Add(bioLODModels.Num());
+	LODModels.AddDefaulted(bioLODModels.Num());
 	for (i = 0; i < bioLODModels.Num(); i++)
 		LODModels[i].RestoreMeshBio(*this, bioLODModels[i]);
 
 	// materials
-	Materials.Add(Textures.Num());
+	Materials.AddDefaulted(Textures.Num());
 	for (i = 0; i < Materials.Num(); i++)
 		Materials[i].TextureIndex = i;
 
@@ -633,12 +668,12 @@ void USkeletalMesh::PostLoadBioshockMesh()
 		// convert skeleton
 		const hkSkeleton *Skel = Object->m_highBoneSkeleton;
 //		assert(RefSkeleton.Num() == 0);
-		RefSkeleton.Add(Skel->m_numBones);
+		RefSkeleton.AddDefaulted(Skel->m_numBones);
 		for (i = 0; i < Skel->m_numBones; i++)
 		{
 			FMeshBone &B = RefSkeleton[i];
 			B.Name.Str    = Skel->m_bones[i]->m_name;				//?? hack: FName assignment
-			B.ParentIndex = max(Skel->m_parentIndices[i], 0);
+			B.ParentIndex = max(Skel->m_parentIndices[i], (hkInt16)0);
 			const hkQsTransform &t = Skel->m_referencePose[i];
 			B.BonePos.Orientation = (FQuat&)   t.m_rotation;
 			B.BonePos.Position    = (FVector&) t.m_translation;
@@ -653,12 +688,12 @@ void USkeletalMesh::PostLoadBioshockMesh()
 		// convert skeleton
 		const hkaSkeleton5 *Skel = Object->m_highBoneSkeleton;
 //		assert(RefSkeleton.Num() == 0);
-		RefSkeleton.Add(Skel->m_numBones);
+		RefSkeleton.AddDefaulted(Skel->m_numBones);
 		for (i = 0; i < Skel->m_numBones; i++)
 		{
 			FMeshBone &B = RefSkeleton[i];
 			B.Name.Str    = Skel->m_bones[i]->m_name;				//?? hack: FName assignment
-			B.ParentIndex = max(Skel->m_parentIndices[i], 0);
+			B.ParentIndex = max(Skel->m_parentIndices[i], (hkInt16)0);
 			const hkQsTransform &t = Skel->m_referencePose[i];
 			B.BonePos.Orientation = (FQuat&)   t.m_rotation;
 			B.BonePos.Position    = (FVector&) t.m_translation;
@@ -682,7 +717,7 @@ void UAnimationPackageWrapper::Process()
 {
 	guard(UAnimationPackageWrapper::Process);
 #if XBOX_HACK
-	if (Package->Platform == PLATFORM_XBOX360) return;
+	if (GetPackageArchive()->Platform == PLATFORM_XBOX360) return;
 #endif
 	FixupHavokPackfile(Name, &HavokData[0]);
 #if 0
@@ -704,6 +739,7 @@ void UAnimationPackageWrapper::Process()
 }
 
 
+// Bioshock 1
 struct FStaticMeshVertexBio
 {
 	FVector					Pos;
@@ -725,9 +761,32 @@ struct FStaticMeshVertexBio
 
 SIMPLE_TYPE(FStaticMeshVertexBio, int)
 
+// Bioshock 1 remastered
+struct FStaticMeshVertexBio1R
+{
+	FVector					Pos;
+	FVector					Normal[3];
+
+	friend FArchive& operator<<(FArchive &Ar, FStaticMeshVertexBio1R &V)
+	{
+		return Ar << V.Pos << V.Normal[0] << V.Normal[1] << V.Normal[2];
+	}
+
+	operator FStaticMeshVertex() const
+	{
+		FStaticMeshVertex r;
+		r.Pos    = Pos;
+		r.Normal = Normal[2];
+		return r;
+	}
+};
+
+SIMPLE_TYPE(FStaticMeshVertexBio1R, float)
+
+// Bioshock 2 (normal and remastered)
 struct FStaticMeshVertexBio2
 {
-	short					Pos[4];
+	uint16					Pos[4];
 	FPackedNormal			Normal[3];
 
 	friend FArchive& operator<<(FArchive &Ar, FStaticMeshVertexBio2 &V)
@@ -762,13 +821,23 @@ void UStaticMesh::SerializeBioshockMesh(FArchive &Ar)
 	if (t3_hdrSV < 9)
 	{
 		// Bioshock 1
-		TArray<FStaticMeshVertexBio> BioVerts;
-		Ar << BioVerts;
-		CopyArray(VertexStream.Vert, BioVerts);
+		if (Ar.ArVer < 142)
+		{
+			TArray<FStaticMeshVertexBio> BioVerts;
+			Ar << BioVerts;
+			CopyArray(VertexStream.Vert, BioVerts);
+		}
+		else
+		{
+			// Bioshock 1 remastered
+			TArray<FStaticMeshVertexBio1R> BioVerts;
+			Ar << BioVerts;
+			CopyArray(VertexStream.Vert, BioVerts);
+		}
 	}
 	else
 	{
-		// Bioshock 2
+		// Bioshock 2 and Bioshock 2 remastered
 		TArray<FStaticMeshVertexBio2> BioVerts2;
 		Ar << BioVerts2;
 		CopyArray(VertexStream.Vert, BioVerts2);

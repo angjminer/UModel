@@ -1,5 +1,5 @@
 UMODEL (UE Viewer)
-(c) Konstantin Nosov (Gildor), 2007-2015
+(c) Konstantin Nosov (Gildor), 2007-2018
 
 
 Please support the development by making a donation here:
@@ -9,7 +9,7 @@ http://www.gildor.org/en/donate
 System requirements
 ~~~~~~~~~~~~~~~~~~~
 Windows or Linux operating system
-x86-compatible CPU with SSE support
+x86-compatible CPU with SSE2 support
 OpenGL 1.1 videocard (OpenGL 2.0 is recommended)
 SDL 2.0 (for Linux only, windows distribution has SDL2.dll included)
 
@@ -35,6 +35,9 @@ http://www.gildor.org/projects/umodel/faq
 Some tutorials available here:
 http://www.gildor.org/projects/umodel/tutorials
 
+Youtube page with tutorials and news:
+https://www.youtube.com/playlist?list=PLJROJrENPVvK-V8PCTR9qBmY0Q7v4wCym
+
 Other documentation:
 http://www.gildor.org/smf/index.php/board,9.0.html
 
@@ -44,15 +47,33 @@ Quick start
 WARNING: it's highly recommended to read the FAQ and to watch video tutorials (see the
 links above) before starting the umodel for the first time.
 
-This is a console application, there is no GUI. Umodel is started with a set of command
-line options. Easiest run is 'umodel <package_file>', it will start umodel in a viewer
-mode. To see the full list of available command line options run 'umodel' with '-help'
-option.
+UModel primarily is a console application, with rich command line capabilities. Easiest
+run is 'umodel <package_file>', it will start umodel in a viewer mode. To see the full
+list of available command line options run 'umodel -help'.
 
-Note: if you will launch program from Windows explorer etc, you will get a console window
-with a help message, but this window will immediately disappear. You could try to drag
-a package file (.upk, .xxx, .ukx etc) to umodel's icon to launch the application.
+You could also drag a package file (.upk, .xxx, .ukx etc) to umodel's icon to launch
+the application. However default settings will be used in this case, so if game requires
+some compatibility options, this will not work.
 
+
+GUI
+~~~
+Some time ago simple GUI has been added for Windows version of UModel. It appears when
+you start UModel without arguments (for example, clicking on UModel icon from Windows
+Explorer). Please note that all command line option still works even in GUI mode.
+A startup window appears only when you have neither game path nor package name specified.
+It will allow you to choose where UModel will look for files ('-path' option) as well as
+compatibility options. If you will set '-path' from the command line, startup GUI will
+not appear. In a case you want to specify path and show startup GUI, add option '-gui'
+to the command line.
+
+Viewer window has user menu on the top of the window. Please review and try options
+provided there. Most of them could be duplicated with keystrokes, and these key shortcuts
+are listed in menu.
+
+
+Viewer mode
+~~~~~~~~~~~
 The application is controlled with keyboard and mouse. You may see the full list of
 keyboard shortcuts by pressing 'H' (Help) key. Here's the list of some shortcuts:
 
@@ -71,8 +92,8 @@ You may attach the AnimSet to the SkeletalMesh object using Ctrl+A key. Animatio
 sequences are listed by '[' and ']' keys, playback is started with a Space key.
 
 
-Notes about psk/psa export
-~~~~~~~~~~~~~~~~~~~~~~~~~~
+Psk/psa export
+~~~~~~~~~~~~~~
 To load psk or psa into the 3ds Max you'll need ActorX Importer script created by me:
 http://www.gildor.org/projects/unactorx
 It has own announcements thread here:
@@ -84,8 +105,8 @@ and cannot be loaded into UnrealEd or any other application with ActorX support.
 only one tool with pskx support at the moment - ActorX Importer mentioned above.
 
 
-Notes about md5mesh/md5anim export
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Md5mesh/md5anim export
+~~~~~~~~~~~~~~~~~~~~~~
 Umodel has possibility to export skeletal meshes and animations in idSoftware md5 format.
 To use this exporter you should use command line option "-md5". MeshAnimation and AnimSet
 objects are exported as multiple md5anim files (one file for each animation track). "bounds"
@@ -103,8 +124,8 @@ Please note that psk/psa format is more powerful, and ActorX Importer script has
 capabilities than md5 Importer.
 
 
-Notes about StaticMesh support
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+StaticMesh export
+~~~~~~~~~~~~~~~~~
 StaticMesh export is performed into psk format. This format was originally designed to hold
 SkeletalMesh, but umodel uses it for StaticMesh too. Exported mesh will not have a skeleton
 and vertex influences. Resulting psk files cannot be imported directly into the UnrealEd,
@@ -112,8 +133,8 @@ so I've decided to save ot with pskx extension to avoid silly user errors. Such 
 be imported into 3ds Max using ActorX Importer plugin as well as ordinary psk file.
 
 
-Notes about material export
-~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Material export
+~~~~~~~~~~~~~~~
 Materials are exported in a custom format. File extension is ".mat". At the current moment,
 this format is supported by ActorX Importer plugin only. Unreal engine materials are very
 complex, so it's very hard to separate a few channels (diffuse, specular, bump etc) from it.
@@ -142,17 +163,286 @@ libmspack - a library for Microsoft compression formats
 
 NVIDIA Texture Tools
   (c) NVIDIA
-  http://code.google.com/p/nvidia-texture-tools/
+  https://github.com/castano/nvidia-texture-tools
 
 PVRTexLib Library
   (c) Imagination Technologies Limited
   http://www.imgtec.com/powervr/insider/
 
+ASTC encoder
+  (c) ARM Limited and Contributors
+  https://github.com/ARM-software/astc-encoder
+
+detex
+  (c) Harm Hanemaaijer
+  https://github.com/hglm/detex
+
+LZ4
+  (c) Yann Collet
+  http://www.lz4.org
+
 
 Changes
 ~~~~~~~
+18.03.2018
+- implemented Gears of War 4 pak file and package support; requires game override -game=gears4 (or use UI)
+
+24.02.2018
+- AES encryption key could be now in hex format: 0x123456789ABCDEF (C-like format)
+
+18.02.2018
+- implemented Heroes of Incredible Tales (HIT) static mesh support; requires -game=hit override
+
+08.02.2018
+- added Paragon support (requires game override: -game=paragon)
+
+07.02.2018
+- implemented UE4.19 support
+
+31.01.2018
+- implemented loader for encrypted compressed UE4 pak files
+
+23.01.2018
+- added support for loading AES-encrypted UE4 pak files; AES key may be specified with command line option
+  -aes=key, or it will be requested by UI when needed
+
+20.01.2018
+- improved laptop keyboard support
+
+04.01.2018
+- updated UE4.18 support
+- displaying a warning message in UE4 SkeletalMesh viewer when Skeleton object is not loaded, and therefore
+  animation will not work
+
+06.12.2017
+- an attempt to make smoothing groups working: always exporting 1st smoothing group for all mesh faces
+
+19.11.2017
+- exporting "source art" (png) textures whenever possible - for UE3 and UE4 editor packages
+
+02.10.2017
+- added Fortnite support (currently requres game override)
+
+29.09.2017
+- added Unreal engine 4.17 support and initial UE4.18 support
+
+29.07.2017
+- implemented Lawbreakers support
+
+28.07.2017
+- added Gigantic auto detection
+
+27.07.2017
+- showing object's group name in viewer for UE1-UE3 games
+
+12.06.2017
+- added Tekken 7 support, game requires override -game=tekken7
+
+09.06.2017
+- added Friday the 13th: The Game support, game requires override -game=friday13
+
+16.05.2017
+- fixed loading of UE4 source animation assets
+
+09.05.2017
+- fixed bug in Win32 SDL2 caused incorrect handling of -path="some path" command line option
+
+26.04.2017
+- added Android ETC2 texture format support
+
+25.04.2017
+- fixes with mesh rotation (only affects mesh display in viewer)
+- exporting skeletal mesh with "-uc" parameter will not also dump mesh socket information
+
+09.04.2017
+- updated UE4.16 support
+
+08.04.2017
+- Heavily optimized package scanner. Results: PARAGON scanned 30 times faster (reduced scan time from 2.5 min
+  to 4 sec) and requires 35% less memory after package scan.
+
+03.04.2017
+- implemented loading of Blade & Soul specific animations
+
+18.03.2017
+- improved handling of unversioned UE4 packages: displaying a dialog box prompting for entering engine version
+
+17.03.2017
+- changed support for UE4 game tags, cleaned up list of UE4 engine versions from -help and -taglist options
+
+08.03.2017
+- added ASTC texture format support
+
+01.03.2017
+- updated SDL2 to 2.0.5
+
+16.02.2017
+- final UE4.15 support, initial 4.16 support
+- added some fix to avoid crash when loading corrupted PARAGON animations
+
+06.02.2017
+- improved support for UE4 versioned packages
+
+01.02.2017
+- updated UE4.15 support
+
+31.01.2017
+- UE4 pak files: umodel skips encrypted files instead of throwing an error
+
+30.01.2017
+- added support for UE4 packages which were cooked for Event Driven Loader (UE4.14+): such packages
+  has separated data into .uexp file with the same name as .uasset
+
+10.01.2017
+- initial UE4.15 support
+
+09.01.2017
+- fixed incorrect decoding of UE2 skeletal mesh when it has soft and rigid parts
+
+27.12.2016
+- Bioshock Remastered (1&2) partial support
+
+02.12.2016
+- added UE4.14 support
+
+20.11.2016
+- exporting all referenced textures from materials, not just recognized ones
+- improved layout of UmodelExport directory when exporting UE4 assets
+
+07.11.2016
+- added simple wildcard capabilities to command line: now package names could contain "*" character
+
+30.10.2016
+- UI: added possibility to append selected packages to loaded package set
+
+28.10.2016
+- added UE4 animation support
+- removed limit to 32k packages in a game, now number of packages is unlimited
+
+19.10.2016
+- added UE4.13 support
+
+30.08.2016
+- UI: added sorting of packages in package dialog
+
+28.08.2016
+- improved package dialog:
+  - "filter" box now accepts multiple strings delimited with spaces
+  - 100x times faster "flat view" (noticeable for UE4 games, with 20k+ packages, especially when typing
+    text in "filter" box)
+
+18.08.2016
+- added UE4 sound export
+
+28.06.2016
+- improved "too many unknown files" error logic - this error will not appear for correct game paths anymore
+
+05.06.2016
+- implemented Devil's Third support
+
+22.05.2016
+- fixed loading of UE4 skeletal meshes with more than 4 bones per vertex: extra weights are dropped, and
+  weights are re-normalized
+
+15.05.2016
+- added UE4.12 support
+- added advanced option "-pkgver=..." to specify exact numeric version for package; useful when UE4 game
+  has mid-release engine files
+- game overriding for UE4 will now work only for unversioned packages; explicitly versioned packages will
+  ignore this option
+
+08.05.2016
+- implemented loading of UE4 StaticMesh from editor packages
+
+02.05.2016
+- added Dungeon Defenders support (-game=dundef is required)
+
+15.02.2016
+- fixed crash with PS3 BulletStorm packages
+- improved support for PS3 audio extraction
+
+11.02.2016
+- added SMITE encryption support; -game=smite is required
+
+06.02.2016
+- added XCOM 2 StaticMesh support (animation is not supported)
+
+26.01.2016
+- added UE4.11 support
+
+21.12.2015
+- reading all texture mipmaps from UE3 and UE4 packages - this speeds up content browsing a lot, especially
+  for games which have huge textures
+
+29.11.2015
+- improved support for UE4 editor packages, added support for editor SkeletalMesh
+
+29.09.2015
+- implemented partial support for UE4 source textures (8-bit uncompressed textures)
+
+26.09.2015
+- implemented support for Blacklight: Retribution textures; note: for the moment game should be overrided to
+  "Tribes: Ascend" (-game=t4)
+
+18.08.2015
+- improved Unreal engine 4 texture support
+
+16.07.2015
+- updated Lineage 2 animation support
+
+11.07.2015
+- added new command line syntax: "umodel <options> <directory>", shortcut to
+  "umodel <options> -path=<directory>"
+
+07.07.2015
+- optimizations of memory use, especially for export operation
+
+06.07.2015
+- implemented full support for Batman: Arkham Knight
+
+26.06.2015
+- implemented Metro Conflict support; -game=metroconf option is required
+
+20.06.2015
+- implemented Mortal Kombat X SkeletalMesh and StaticMesh support
+
+14.06.2015
+- added support for up to 8 UV sets, required for UE4 static meshes
+
+13.06.2015
+- added "Save selected packages" option for "Tools" button in package dialog - this allows user
+  to extract packages from pak and obb files
+
+12.06.2015
+- added support for compressed UE4 pak files
+- implemented UE4.8 support
+
+11.06.2015
+- improved UE3 Android support
+
+04.06.2015
+- added Might & Magic Heroes 7 support
+
+14.05.2015
+- added full BC7 texture format support using "detex" library
+- added support for Android ETC texture packages (DXT5 format didn't work)
+
+24.04.2015
+- implemented Mortal Kombat X textre support; note: all textures are in BC7 format, no extraction
+  possible
+
+20.04.2015
+- added Mortal Kombat X package support
+
+19.04.2015
+- added UV display mode for skeletal and static meshes, activated with Ctrl+U
+- improved UE4 SkeletalMesh LOD support
+
+08.04.2015
+- implemented support for destructible meshes: UE3 FracturedStaticMesh and UE4 DestructibleMesh
+
 07.03.2015
-- added Gigantic (alpha) support
+- added Gigantic (alpha) support (-game=gigantic is required)
 
 02.02.2015
 - implemented Life is Strange support

@@ -1,5 +1,5 @@
-#ifndef __STATICMESH_H__
-#define __STATICMESH_H__
+#ifndef __STATIC_MESH_H__
+#define __STATIC_MESH_H__
 
 #include "MeshCommon.h"
 
@@ -13,17 +13,13 @@ struct CStaticMeshVertex : public CMeshVertex
 };
 
 
-struct CStaticMeshLod
+struct CStaticMeshLod : public CBaseMeshLod
 {
-	// generic properties
-	int						NumTexCoords;
-	bool					HasNormals;
-	bool					HasTangents;
-	// geometry
-	TArray<CMeshSection>	Sections;
 	CStaticMeshVertex		*Verts;
-	int						NumVerts;
-	CIndexBuffer			Indices;
+
+	CStaticMeshLod()
+	: Verts(NULL)
+	{}
 
 	~CStaticMeshLod()
 	{
@@ -50,6 +46,7 @@ struct CStaticMeshLod
 		assert(Verts == NULL);
 		Verts    = (CStaticMeshVertex*)appMalloc(sizeof(CStaticMeshVertex) * Count, 16);		// alignment for SSE
 		NumVerts = Count;
+		AllocateUVBuffers();
 		unguard;
 	}
 
@@ -83,6 +80,20 @@ public:
 			Lods[i].BuildNormals();
 	}
 
+#if RENDERING
+	void LockMaterials()
+	{
+		for (int i = 0; i < Lods.Num(); i++)
+			Lods[i].LockMaterials();
+	}
+
+	void UnlockMaterials()
+	{
+		for (int i = 0; i < Lods.Num(); i++)
+			Lods[i].UnlockMaterials();
+	}
+#endif
+
 #if DECLARE_VIEWER_PROPS
 	DECLARE_STRUCT(CStaticMesh)
 	BEGIN_PROP_TABLE
@@ -100,4 +111,4 @@ private:
 	REGISTER_CLASS(CStaticMeshLod)
 
 
-#endif // __STATICMESH_H__
+#endif // __STATIC_MESH_H__

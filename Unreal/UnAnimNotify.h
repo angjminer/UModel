@@ -1,5 +1,5 @@
-#ifndef __UNANIMNOTIFY_H__
-#define __UNANIMNOTIFY_H__
+#ifndef __UNANIM_NOTIFY_H__
+#define __UNANIM_NOTIFY_H__
 
 
 /*-----------------------------------------------------------------------------
@@ -141,10 +141,14 @@ public:
 		PROP_DROP(VolumeMultiplier)
 		PROP_DROP(PitchMultiplier)
 #endif
+#if BLADENSOUL
+		PROP_DROP(SoundVolume)
+#endif
 #if BATMAN
 		PROP_DROP(CharacterFilter_Enabled)
 		PROP_DROP(CharacterFilter)
 		PROP_DROP(EventName)
+		PROP_DROP(CharacterFilters)
 #endif
 	END_PROP_TABLE
 };
@@ -178,4 +182,4 @@ public:
 	REGISTER_CLASS(UAnimNotify_Trigger)
 
 
-#endif // __UNANIMNOTIFY_H__
+#endif // __UNANIM_NOTIFY_H__

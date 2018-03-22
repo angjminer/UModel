@@ -10,6 +10,23 @@
 
  Revision History:
 
+	06.12.2017 v1.35
+	- an attempt to make smoothing groups working
+	- renamed "recurse" option to "look in subfolders" to be less confising to new users
+
+    16.10.2017 v1.34
+    - added possibility to select and open multiple psk files at time
+
+	21.07.2015 v1.33
+	- saving bind pose information inside bone objects, this information will survive saving scene
+	  to a max file
+
+	18.07.2015 v1.32
+	- allowing psa import to work with any mesh, i.e. without previously imported psk file
+
+	14.07.2015 v1.31
+	- trying to detect and repair bad vertex weights for imported psk file
+
 	01.02.2015 v1.30
 	- added animation import option "import at slider position"
 	- integrated patch by Ayrshi (http://www.gildor.org/smf/index.php/topic,1925.0.html) intended to
@@ -143,14 +160,25 @@
 
 /*
 TODO:
-- try to not use setBoneEnable false ...
 - option to create separate materials, not submaterials
 - do not create material when it is already exists - but how to find whether I need to get loaded material
   or create a new one?
 */
 
+/*
+NOTES:
+- setBoneEnable false 0:
+  This call is required. Without it, we will have numerous problems with imported skeleton. Note that FBX
+  importer will enable "bones" mode, however we can't use it in Max. Why "bone" mode could be useful: hiding
+  bones could not hide the skeleton when bones are off, and works well when they are on. Why "bone" mode should
+  be disabled - otherwise we've got problems with rotation/moving of particular bones, they behave like
+  connected objects. Also saw a bug with imported animation with "force AnimSet translation" - mesh could became
+  bronen in parts, but began to behave well when unlinked child bone of bad bone and relinked it back. So it's
+  easier to disable bone mode than to fight against all the bugs.
+*/
+
 -- constant used to detect ActorX Importer updates during single 3ds Max session
-global AX_IMPORTER_VERSION = 130
+global AX_IMPORTER_VERSION = 135
 
 -------------------------------------------------------------------------------
 --	Global variables
@@ -179,8 +207,7 @@ global g_transZ
 global g_meshScale
 global g_reorientBones
 global g_dontConjugateRoot
-global Anims
-global MeshBones
+global Anims					-- array of AnimInfoBinary
 
 
 -------------------------------------------------------------------------------
@@ -226,6 +253,11 @@ if getSourceFileName != undefined then	-- checking Max version (Max9+) ...
 	local s = getSourceFileName()
 	configFile = (getFilenamePath s) + (getFilenameFile s) + ".ini"
 )
+else
+(
+	-- workaround for Max 8 and older
+	configFile = (getDir #scripts) + "\ActorXImporter.ini"
+)
 
 
 tmp_v = undefined		-- global variable, helper for axDoSetting() (required for execute() ...)
@@ -265,9 +297,9 @@ fn axDoSetting name var =
 
 fn axSerializeSettings isLoading =
 (
+	if configFile == undefined then return undefined			-- could happen with old 3ds Max, where getSourceFileName() doesn't exist
 	if isLoading then
 	(
-		if configFile == undefined then return undefined
 		if not doesFileExist configFile then return undefined	-- no config file
 	)
 	g_isLoading = isLoading
@@ -348,7 +380,7 @@ fn ReadFixedString bstream fixedLen =
 
 fn ReadVector2 bstream =
 (
-	local v = [ 0, 0 ]
+	local v = point2 0 0
 	v.x = ReadFloat bstream
 	v.y = ReadFloat bstream
 	v
@@ -356,7 +388,7 @@ fn ReadVector2 bstream =
 
 fn ReadFVector bstream =
 (
-	local v = [ 0, 0, 0 ]
+	local v = point3 0 0 0
 	v.x = ReadFloat bstream
 	v.y = ReadFloat bstream
 	v.z = ReadFloat bstream
@@ -448,6 +480,32 @@ fn axGetRootMatrix =
 	m
 )
 
+-- Reference: https://forums.autodesk.com/t5/3ds-max-programming/getopenfilename-for-multiple-files/td-p/4097903
+fn getMultiOpenFilenames caption: "Open" filename: "" types: "All Files (*.*)|*.*" default: 1 =
+(
+	local dlg = DotNetObject "System.Windows.Forms.OpenFileDialog"
+	dlg.multiSelect = true
+	dlg.title = caption
+
+	local p = getFilenamePath filename
+	if doesFileExist p then
+	dlg.initialDirectory = p
+
+	-- MAXScript getOpenFilename uses trailing |;
+	-- OpenFileDialog filter does not.
+	if types == "|" then
+		dlg.filter = (substring types 1 (types.count - 1))
+	else
+		dlg.filter = types
+
+	dlg.filterIndex = default
+
+	local result = dlg.ShowDialog()
+	if (result.Equals result.OK) then
+		dlg.filenames
+	else
+		undefined
+)
 
 -------------------------------------------------------------------------------
 --	ActorX data structures
@@ -671,6 +729,20 @@ fn ReadVQuatAnimKey bstream =
 
 
 -------------------------------------------------------------------------------
+--	Bone attributes
+-------------------------------------------------------------------------------
+
+AXBoneCustomDataDef = attributes AXBoneCustomData
+attribID:#(0xF3DD7FCD, 0x4DB58449)
+(
+	parameters BindPose
+	(
+		AX_RelMatrix	type: #matrix3		-- matrix relative to parent bone
+		AX_WorldMatrix	type: #matrix3		-- world matrix
+	)
+)
+
+-------------------------------------------------------------------------------
 --	Loading materials
 -------------------------------------------------------------------------------
 
@@ -762,13 +834,36 @@ fn axImportMaterial matName texDir =
 --	MAX helpers
 -------------------------------------------------------------------------------
 
+fn FindAllBones_Recurse bones parent =
+(
+	for i = 1 to parent.children.count do
+	(
+		node = parent.children[i]
+		if isKindOf node BoneObj then
+		(
+			append bones node
+		)
+		FindAllBones_Recurse bones node
+	)
+)
+
+fn FindAllBones =
+(
+	local bones = #()
+
+	FindAllBones_Recurse bones rootNode
+
+	bones
+)
+
 fn RemoveAnimation =
 (
 	stopAnimation()
-	for i = 1 to MeshBones.count do
+	bones = FindAllBones()
+	for i = 1 to bones.count do
 	(
-		local Bone = getNodeByName MeshBones[i].Name exact:true ignoreCase:true
-		if Bone != undefined then deleteKeys Bone #allKeys
+		b = bones[i]
+		deleteKeys b #allKeys
 	)
 	animationRange = interval 0 1
 )
@@ -783,13 +878,19 @@ fn RestoreBindpose =
 		local rotMatrix = axGetRootMatrix()
 		-- note: should rotate every bone because we are not applying parent's rotation here
 		-- find bones
-		for i = 1 to MeshBones.count do
+		bones = FindAllBones()
+		for i = 1 to bones.count do
 		(
-			local Bone = getNodeByName MeshBones[i].Name exact:true ignoreCase:true
-			if Bone == undefined then
-				format "WARNING: cannot find the bone %\n" MeshBones[i].Name
-			else
-				Bone.transform = MeshBones[i].Matrix * rotMatrix
+			b = bones[i]
+			data = custAttributes.get b AXBoneCustomDataDef
+			if data != undefined then
+			(
+				b.transform = data.AX_WorldMatrix * rotMatrix
+			)
+--			else
+--			(
+--				format "no info for %\n" b.name
+--			)
 		)
 
 		set coordsys world
@@ -816,13 +917,11 @@ fn ImportPskFile filename skelOnly:false =
 (
 	set coordsys world
 
-	local OldMeshBones = MeshBones
-
 	local Verts     = #()
 	local Wedges    = #()
 	local Tris      = #()
 	local Materials = #()
-		  MeshBones = #()		-- global for access to bind pose from outside
+	local MeshBones = #()
 	local Infs      = #()
 
 	--------- Read the file ---------
@@ -836,6 +935,8 @@ fn ImportPskFile filename skelOnly:false =
 	local numTexCoords  = 1
 
 	local extraUV = #()
+
+	local profileStartTime = timeStamp()
 
 	try
 	(
@@ -1001,6 +1102,7 @@ fn ImportPskFile filename skelOnly:false =
 		(
 			if (g_reorientBones == false or childBone == undefined) then
 			(
+				-- create new bone
 				newBone = bonesys.createbone	\
 					  bn.Matrix.row4			\
 					  (bn.Matrix.row4 + len * (normalize bn.Matrix.row1)) \
@@ -1008,6 +1110,7 @@ fn ImportPskFile filename skelOnly:false =
 			)
 			else
 			(
+				-- reorient bone matrix to point directly to a child
 				-- get world position of the child bone
 				local childPos = childBone.Position * bn.Matrix * g_meshScale
 				newBone = bonesys.createbone	\
@@ -1018,7 +1121,7 @@ fn ImportPskFile filename skelOnly:false =
 			newBone.name   = bn.Name
 			newBone.width  = g_boneSize
 			newBone.height = g_boneSize
-			newBone.setBoneEnable false 0
+			newBone.setBoneEnable false 0					-- this is a required thing, otherwise a lot of problems would appear
 			newBone.pos.controller      = TCB_position ()
 			newBone.rotation.controller = TCB_rotation ()	-- required for correct animation
 			-- setup parent
@@ -1031,6 +1134,12 @@ fn ImportPskFile filename skelOnly:false =
 				)
 				newBone.parent = MaxBones[bn.ParentIndex + 1]
 			)
+			-- store bind pose in custom data block
+			custAttributes.add newBone AXBoneCustomDataDef
+			mat = (normalize q) as matrix3		-- rebuild 'mat', but without scale
+			mat.row4 = bn.Position
+			newBone.AX_RelMatrix   = mat
+			newBone.AX_WorldMatrix = bn.Matrix
 		)
 		else
 		(
@@ -1050,7 +1159,6 @@ fn ImportPskFile filename skelOnly:false =
 	for i = 1 to numVerts do VertList[i] = #()	-- initialize with empty array
 	for i = 1 to numWedges do
 	(
---!!		MaxVerts[i] = Verts[Wedges[i].PointIndex + 1] * g_meshScale
 		local vertId = Wedges[i].PointIndex + 1
 		MaxVerts[i] = Verts[vertId] * g_meshScale
 		append VertList[vertId] i
@@ -1081,6 +1189,7 @@ fn ImportPskFile filename skelOnly:false =
 		tri = Tris[i]
 		meshop.setMapFace newMesh 1 i [ tri.Wedge1+1, tri.Wedge0+1, tri.Wedge2+1 ]
 		setFaceMatId newMesh i (tri.MatIndex+1)
+		setFaceSmoothGroup newMesh i tri.SmoothingGroups
 	)
 	-- extra UV sets (code is similar to above!)
 	for j = 2 to numTexCoords do
@@ -1095,15 +1204,6 @@ fn ImportPskFile filename skelOnly:false =
 			uv = uvSet[i]
 			meshop.setMapVert newMesh j i [ uv.x, 1-uv.y, 1-uv.y ]	-- V coordinate is flipped
 		)
-/* commented 18.04.2014 - probably this is not needed, because completely duplicates code for 1st UV set
-		for i = 1 to numTris do
-		(
-			-- setup face vertices and material
-			tri = Tris[i]
-			meshop.setMapFace newMesh j i [ tri.Wedge1+1, tri.Wedge0+1, tri.Wedge2+1 ]
-			setFaceMatId newMesh i (tri.MatIndex+1)
-		)
-*/
 	)
 
 	newMat = multiMaterial numsubs:numMaterials
@@ -1199,14 +1299,6 @@ fn ImportPskFile filename skelOnly:false =
 	-- setup vertex influences (weights)
 	qsort Infs InfluenceSort
 
-/*	for i = 1 to numInfluences-1 do
-	(
-		v1 = Infs[i]
-		v2 = Infs[i+1]
-		if (v1.PointIndex == v2.PointIndex) and (v1.BoneIndex == v2.BoneIndex) then
-			format "Point % has multiple weights for bone %\n" v1.PointIndex MeshBones[v2.BoneIndex].Name
-	) */
-
 	-- build vertex to influence map
 	vertInfStart = #()
 	vertInfNum   = #()
@@ -1227,26 +1319,48 @@ fn ImportPskFile filename skelOnly:false =
 		)
 	)
 
---	progressStart "Setting weights ..."
+--	progressStart "Setting weights ..." -- shouldn't call progress functions, causes crash in script
 	disableSceneRedraw()
+	numRepairedVerts = 0
+	numBadVerts = 0
 	try
 	(
+
 		for wedge = 1 to numWedges do
 		(
 			vert    = Wedges[wedge].PointIndex+1
 			start   = vertInfStart[vert]
 			numInfs = vertInfNum[vert]
+			if numInfs == undefined then
+			(
+				numInfs = 0
+				format "Vertex % (wedge %) has no weights\n" (vert-1) (wedge-1)
+			)
+
 /*
-			-- This code uses SetVertexWeights; it is fast, but Max will automatically assign
-			-- vertex weights to a nearest bone when creating mesh, and there is no simple
-			-- way to erase them. SetVertexWeights will not erase extra weights.
+			-- This code uses SetVertexWeights
+			oldBone = skinOps.GetVertexWeightBoneID skinMod wedge 1
+			numWeights = skinOps.GetVertexWeightCount skinMod wedge
+			if numWeights > 1 then
+			(
+				skinOps.ReplaceVertexWeights skinMod wedge oldBone 1
+			)
 			for i = 1 to numInfs do
 			(
 				v = Infs[start + i - 1]
---				format "Inf %(%) % : %\n" wedge vert MeshBones[v.BoneIndex+1].Name v.Weight
-				skinOps.SetVertexWeights skinMod wedge (v.BoneIndex+1) v.Weight
-			) */
-
+				b = boneIDMap[v.BoneIndex+1]
+--				format "Inf %(%) % : %\n" wedge vert MeshBones[b].Name v.Weight
+				skinOps.SetVertexWeights skinMod wedge b v.Weight
+				if b == oldBone then
+				(
+					oldBone = -1
+				)
+			)
+			if oldBone > 0 then
+			(
+				skinOps.SetVertexWeights skinMod wedge oldBone 0
+			)
+*/
 			-- This code uses ReplaceVertexWeights with arrays, a few times slower;
 			-- it is still here in a case of bugs with SetVertexWeights path
 			infBones   = #()
@@ -1257,10 +1371,42 @@ fn ImportPskFile filename skelOnly:false =
 				append infBones   boneIDMap[v.BoneIndex + 1]
 				append infWeights v.Weight
 			)
---			format "W[%] V[%] % // %\n" wedge vert infBones infWeights
 			skinOps.ReplaceVertexWeights skinMod wedge infBones infWeights
-			-- NOTE: ReplaceVertexWeights will reset infBones and infWeights arrays, so we
-			-- cannot reuse them
+			-- NOTE: older Max versions after ReplaceVertexWeights call performed reset of infBones and
+			-- infWeights arrays, so we wasn't able to reuse them. At least Max 2015 doesn't do that.
+
+			-- Check is weights were set correctly
+			numWeights = skinOps.GetVertexWeightCount skinMod wedge
+			if numWeights != numInfs then
+			(
+				-- We've tried to set weights for this vertex, but MaxScript decided to keep
+				-- other bones as dependency (bug in ReplaceVertexWeights). Try to repair:
+				-- enumerate all current weights and set unwanted bone weights to 0 explicitly.
+				-- Note: it looks like this is not an issue for Max 2014, it appears in 2015:
+				-- https://trello.com/c/76npwkAY/115-possible-bug-with-importer-on-max-2015
+--				format "Bad vertex: % bones(%) but %\n" wedge numInfs numWeights
+				for w = 1 to numWeights do
+				(
+					bone = skinOps.GetVertexWeightBoneID skinMod wedge w
+					found = findItem infBones bone
+					if found == 0 then
+					(
+						append infBones bone
+						append infWeights 0
+					)
+				)
+				skinOps.ReplaceVertexWeights skinMod wedge infBones infWeights
+				numWeights = skinOps.GetVertexWeightCount skinMod wedge
+				if numWeights != numInfs then
+				(
+--					format "Bad vertex: %: bones(%) weights(%)\n" wedge infBones infWeights
+					numBadVerts += 1
+				)
+				else
+				(
+					numRepairedVerts += 1
+				)
+			)
 --			progressUpdate (100.0 * wedge / numWedges)
 		)
 	)
@@ -1272,6 +1418,10 @@ fn ImportPskFile filename skelOnly:false =
 	)
 	enableSceneRedraw()
 --	progressEnd()
+	if (numRepairedVerts > 0) or (numBadVerts > 0) then
+	(
+		format "Problems during skinning: % bad vertices, % repaired vertices\n" numBadVerts numRepairedVerts
+	)
 
 	-- apply mesh rotation
 	if numBones >= 1 then
@@ -1279,33 +1429,8 @@ fn ImportPskFile filename skelOnly:false =
 		MaxBones[1].transform = MaxBones[1].transform * axGetRootMatrix()
 	)
 
-	-- combine with old skeleton for correct work of combined meshes
-	format "... processing % OldMeshBones\n" OldMeshBones.count
-	for i = 1 to OldMeshBones.count do
-	(
-		boneName = OldMeshBones[i].Name
-		found = false
-		-- find bone in MeshBones
-		for j = 1 to MeshBones.count while not found do
-		(
-			if MeshBones[j].Name == boneName then
-			(
---				format "..... found in MeshBones"
-				found = true
-			)
-		)
-		if not found then
-		(
-			-- bone already exists in MeshBones array
-			-- find bone in Max scene
-			if getNodeByName boneName exact:true ignoreCase:true != undefined then
-			(
-				-- bone still exists in Max scene, should add it to MeshBones array
-				MeshBones[MeshBones.count+1] = OldMeshBones[i]
---				format "... restored bone from old mesh: %\n" boneName
-			)
-		)
-	)
+	local profileEndTime = timeStamp()
+	format "Loaded in % sec\n" ((profileEndTime - profileStartTime) / 1000.0)
 
 	gc()
 )
@@ -1576,30 +1701,36 @@ fn ImportPsaFile filename trackNum all:false =
 
 	if keyPos == 0 then
 	(
-		format "No ANIMKEYS chunk were found\n"
+		format "No ANIMKEYS chunk was found\n"
 		return undefined
 	)
 
 	-- find existing scene bones
 	MaxBones     = #()
-	MeshBoneLink = #()
+	BindPoseInfo = #()
+	SceneBones = FindAllBones()
 	for i = 1 to numBones do
 	(
-		boneName        = Bones[i].Name
-		MaxBones[i]     = getNodeByName boneName exact:true ignoreCase:true
-		MeshBoneLink[i] = undefined
-		local notfound  = true
-		for j = 1 to MeshBones.count while notfound do
+		boneName = Bones[i].Name
+		local notfound = true
+		for j = 1 to SceneBones.count while notfound do
 		(
-			if MeshBones[j].Name == boneName then
+			b = SceneBones[j]
+			if b.name == boneName then
 			(
-				MeshBoneLink[i] = MeshBones[j]
-				notfound = false
+				MaxBones[i]     = b
+				BindPoseInfo[i] = custAttributes.get b AXBoneCustomDataDef	-- could be 'undefined'
+				notfound        = false
 			)
 		)
-		if notfound or (MaxBones[i] == undefined) then
+
+		if notfound then
 		(
 			format "WARNING: cannot find bone %\n" boneName
+		)
+		else if BindPoseInfo[i] == undefined then
+		(
+			format "WARNING: cannot get bind pose information for bone %\n" boneName
 		)
 	)
 
@@ -1647,33 +1778,62 @@ fn ImportPsaFile filename trackNum all:false =
 				for b = 1 to Bones.count do
 				(
 					-- get key
-					k = ReadVQuatAnimKey file			-- read key from file
+					k = ReadVQuatAnimKey file				-- read key from file
 					-- get bones
-					bone     = MaxBones[b]				-- scene bone to transform
-					MeshBone = MeshBoneLink[b]			-- for BindPose transform
+					bone     = MaxBones[b]					-- scene bone to transform
+					BindPose = BindPoseInfo[b]				-- for BindPose transform
 					-- get animation flags
 					flag = 0
 					if flagIndex < flagCount then flag = AnimFlags[flagIndex]
 					flagIndex = flagIndex + 1
-					-- when either scene or mesh bone is missing , skip everything (key is already read)
-					if (bone == undefined) or (MeshBone == undefined) then continue
+					-- when either scene or mesh bone is missing, skip everything (key was already read)
+					if bone == undefined then continue
 
-					if (bit.and flag 1) != 0 then		-- NO_TRANSLATION
-						p = MeshBone.Position			-- translation from the mesh
-					else if not UseAnimTranslation[b] then
-						p = MeshBone.Position			-- translation from the mesh
+					local mat
+					if BindPose != undefined then
+					(
+						-- rotation
+						if (bit.and flag 2) != 0 then		-- NO_ROTATION
+						(
+							-- rotation from mesh
+							mat = BindPose.AX_RelMatrix
+						)
+						else
+						(
+							-- rotation from animation
+							q = k.Orientation
+							if ((b == 1) and not g_dontConjugateRoot) then q = conjugate q
+							mat = (q as matrix3)
+						)
+						-- translation
+						if (bit.and flag 1) != 0 then		-- NO_TRANSLATION
+						(
+							-- translation from the mesh
+							mat.row4 = BindPose.AX_RelMatrix.row4 * g_meshScale
+						)
+						else if not UseAnimTranslation[b] then
+						(
+							-- translation from the mesh
+							mat.row4 = BindPose.AX_RelMatrix.row4 * g_meshScale
+						)
+						else
+						(
+							-- translation from animation
+							mat.row4 = k.Position * g_meshScale
+						)
+					)
 					else
-						p = k.Position * g_meshScale	-- translation from animation
+					(
+						-- the BindPose object doesn't exists, use all data from the animation
+						q = k.Orientation					-- rotation from animation
+						p = k.Position * g_meshScale		-- translation from animation
+						-- build matrix
+						if ((b == 1) and not g_dontConjugateRoot) then q = conjugate q
+						-- build matrix
+						mat = (q as matrix3)
+						mat.row4 = p
+					)
 
-					if (bit.and flag 2) != 0 then		-- NO_ROTATION
-						q = MeshBone.Orientation		-- from mesh
-					else
-						q = k.Orientation				-- from animation
-
-					if ((b == 1) and not g_dontConjugateRoot) then q = conjugate q
-					-- build matrix
-					mat = (q as matrix3)
-					mat.row4 = p
 					-- modify bone
 					if bone.parent != undefined then
 					(
@@ -1797,8 +1957,8 @@ fn axLoadAnimation index =
 rollout axInfoRollout "ActorX Importer"
 (
 	-- copyright label
-	label     Lbl1 "Version 1.30"
-	label     Lbl2 "\xA9 2009-2015 Konstantin Nosov (Gildor)"
+	label     Lbl1 "Version 1.35"
+	label     Lbl2 "\xA9 2009-2018 Konstantin Nosov (Gildor)"
 	hyperlink Lbl3 "http://www.gildor.org/" \
 					address:"http://www.gildor.org/projects/unactorx" align:#center \
 					color:black hovercolor:blue visitedcolor:black
@@ -1825,12 +1985,29 @@ rollout axMeshImportRollout "Mesh Import"
 
 	on BtnImportPsk pressed do
 	(
-		local filename = getOpenFileName types:"ActorX Mesh (*.psk,*.pskx)|*.psk;*.pskx|All (*.*)|*.*|" filename:g_lastDir1
-		if filename != undefined then
+		if DotNetObject == undefined then
 		(
-			MeshFileName = filename
-			g_lastDir1 = getFilenamePath MeshFileName
-			if DoesFileExist MeshFileName then ImportPskFile MeshFileName skelOnly:g_skelOnly
+			-- older Max didn't have functionality for getMultiOpenFilenames
+			local filename = getOpenFileName types:"ActorX Mesh (*.psk,*.pskx)|*.psk;*.pskx|All (*.*)|*.*|" filename:g_lastDir1
+			if filename != undefined then
+			(
+				MeshFileName = filename
+				g_lastDir1 = getFilenamePath MeshFileName
+				if DoesFileExist MeshFileName then ImportPskFile MeshFileName skelOnly:g_skelOnly
+			)
+		)
+		else
+		(
+			local filenames = getMultiOpenFilenames types:"ActorX Mesh (*.psk,*.pskx)|*.psk;*.pskx|All (*.*)|*.*" filename:g_lastDir1
+			if filenames != undefined then
+			(
+				for filename in filenames do
+				(
+					MeshFileName = filename
+					g_lastDir1 = getFilenamePath MeshFileName
+					if DoesFileExist MeshFileName then ImportPskFile MeshFileName skelOnly:g_skelOnly
+				)
+			)
 		)
 	)
 )
@@ -1891,7 +2068,7 @@ rollout axTexturesRollout "Materials"
 (
 	edittext EdTexPath     "Path to materials" text:g_texDir width:180 across:2
 	button   BtnBrowseTex  "..."     align:#right height:16
-	checkbox ChkTexRecurse "Recurse" checked:g_texRecurse
+	checkbox ChkTexRecurse "Look in subfolders" checked:g_texRecurse
 	label    LblMissingTex "On missing texture:" across:2
 	radiobuttons RadMissingTex labels:#("do nothing", "ask") default:g_texMissAction align:#left columns:1
 
@@ -2054,7 +2231,6 @@ if (g_axImporterVersion == undefined) then
 	-- initialize plugin
 	heapSize += 33554432	-- 32 Mb; will speedup most tasks
 	Anims     = #()
-	MeshBones = #()
 	g_axImporterVersion = AX_IMPORTER_VERSION
 	axDefaultSettings()
 	axSerializeSettings(true)

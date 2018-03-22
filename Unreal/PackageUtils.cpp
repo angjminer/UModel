@@ -30,7 +30,7 @@ bool LoadWholePackage(UnPackage* Package, IProgressCallback* progress)
 		Package->CreateExport(idx);
 	}
 	UObject::EndLoad();
-	GFullyLoadedPackages.AddItem(Package);
+	GFullyLoadedPackages.Add(Package);
 
 #if PROFILE
 	appPrintProfiler();
@@ -43,8 +43,10 @@ bool LoadWholePackage(UnPackage* Package, IProgressCallback* progress)
 
 void ReleaseAllObjects()
 {
+	guard(ReleaseAllObjects);
+
 #if 0
-	appPrintf("Memory: allocated %d bytes in %d blocks\n", GTotalAllocationSize, GTotalAllocationCount);
+	appPrintf("Memory: allocated " FORMAT_SIZE("d") " bytes in %d blocks\n", GTotalAllocationSize, GTotalAllocationCount);
 	appDumpMemoryAllocations();
 #endif
 	for (int i = UObject::GObjObjects.Num() - 1; i >= 0; i--)
@@ -65,8 +67,10 @@ void ReleaseAllObjects()
 		}
 	}
 #endif
-	appPrintf("Memory: allocated %d bytes in %d blocks\n", GTotalAllocationSize, GTotalAllocationCount);
+	appPrintf("Memory: allocated " FORMAT_SIZE("d") " bytes in %d blocks\n", GTotalAllocationSize, GTotalAllocationCount);
 //	appDumpMemoryAllocations();
+
+	unguard;
 }
 
 
@@ -110,7 +114,7 @@ static bool ScanPackage(const CGameFileInfo *file, ScanPackageData &data)
 
 	// read a few first bytes as integers
 	FArchive *Ar = appCreateFileReader(file);
-	unsigned int FileData[16];
+	uint32 FileData[16];
 	Ar->Serialize(FileData, sizeof(FileData));
 	delete Ar;
 
@@ -122,11 +126,12 @@ static bool ScanPackage(const CGameFileInfo *file, ScanPackageData &data)
 	}
 	else if (Tag != PACKAGE_FILE_TAG)	//?? possibly Lineage2 file etc
 	{
-		//!! use CreatePackageLoader() here to allow scanning of packages with custom header (Lineage etc);
-		//!! do that only when something "strange" within data noticed
+		//!! Use CreatePackageLoader() here to allow scanning of packages with custom header (Lineage etc);
+		//!! do that only when something "strange" within data noticed.
+		//!! Also, this function could react on custom package tags.
 		return true;
 	}
-	int Version = FileData[1];
+	uint32 Version = FileData[1];
 
 	FileInfo Info;
 
@@ -158,7 +163,7 @@ static bool ScanPackage(const CGameFileInfo *file, ScanPackageData &data)
 		}
 	}
 	if (Index == INDEX_NONE)
-		Index = data.PkgInfo->AddItem(Info);
+		Index = data.PkgInfo->Add(Info);
 	// update info
 	FileInfo& fileInfo = (*data.PkgInfo)[Index];
 	fileInfo.Count++;

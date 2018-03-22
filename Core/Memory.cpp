@@ -10,12 +10,13 @@
 int GNumAllocs = 0;
 #endif
 
-int GTotalAllocationSize = 0;
-int GTotalAllocationCount = 0;
+size_t GTotalAllocationSize = 0;
+int    GTotalAllocationCount = 0;
 
-#define BLOCK_MAGIC		0xAE
-#define FREE_BLOCK		0xFE
+#define BLOCK_MAGIC				0xAE
+#define FREE_BLOCK				0xFE
 
+#define MAX_ALLOCATION_SIZE		(257<<20)		// upper limit for single allocation is 256+1 Mb
 
 #if DEBUG_MEMORY
 
@@ -100,12 +101,12 @@ CBlockHeader* CBlockHeader::first = NULL;
 void *appMalloc(int size, int alignment)
 {
 	guard(appMalloc);
-	if (size < 0 || size >= (256<<20))		// upper limit to allocation is 256Mb
-		appError("Trying to allocate %d bytes", size);
+	if (size < 0 || size >= MAX_ALLOCATION_SIZE)
+		appError("Memory: bad allocation size %d bytes", size);
 	assert(alignment > 1 && alignment <= 256 && ((alignment & (alignment - 1)) == 0));
 	void *block = malloc(size + sizeof(CBlockHeader) + (alignment - 1));
 	if (!block)
-		appError("Failed to allocate %d bytes", size);
+		appError("Out of memory: failed to allocate %d bytes", size);
 	void *ptr = Align(OffsetPointer(block, sizeof(CBlockHeader)), alignment);
 	if (size > 0)
 		memset(ptr, 0, size);
@@ -149,7 +150,7 @@ void *appMalloc(int size, int alignment)
 #endif
 
 	return ptr;
-	unguardf("size=%d", size);
+	unguardf("size=%d (total=%d Mbytes)", size, (int)(GTotalAllocationSize >> 20));
 }
 
 void* appRealloc(void *ptr, int newSize)
@@ -161,8 +162,8 @@ void* appRealloc(void *ptr, int newSize)
 
 	CBlockHeader *hdr = (CBlockHeader*)ptr - 1;
 
-	int offset = hdr->offset + 1;
-	void *block = OffsetPointer(ptr, -offset);
+	int oldSize = hdr->blockSize;
+	if (oldSize == newSize) return ptr;	// size not changed
 
 	assert(hdr->magic == BLOCK_MAGIC);
 	hdr->magic--;		// modify to any value
@@ -171,10 +172,12 @@ void* appRealloc(void *ptr, int newSize)
 #endif
 
 	int alignment = hdr->align + 1;
-	int oldSize   = hdr->blockSize;
 	void *newData = appMalloc(newSize, alignment);
 
 	memcpy(newData, ptr, min(newSize, oldSize));
+
+	int offset = hdr->offset + 1;
+	void *block = OffsetPointer(ptr, -offset);
 
 #if DEBUG_MEMORY
 	memset(ptr, FREE_BLOCK, oldSize);
@@ -319,7 +322,7 @@ void appDumpMemoryAllocations()
 {
 	appPrintf(
 		"Memory information:\n"
-		"%d bytes allocated in %d blocks from %d points\n\n", GTotalAllocationSize, GTotalAllocationCount, GNumAllocationPoints
+		FORMAT_SIZE("d")" bytes allocated in %d blocks from %d points\n\n", GTotalAllocationSize, GTotalAllocationCount, GNumAllocationPoints
 	);
 
 	// collect statistics

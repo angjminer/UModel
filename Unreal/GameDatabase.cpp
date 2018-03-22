@@ -83,6 +83,9 @@ const GameInfo GListOfGames[] = {
 #	if VANGUARD
 		G("Vanguard: Saga of Heroes", vang, GAME_Vanguard),
 #	endif
+#	if EOS
+		G("Echo of Soul", eos, GAME_EOS),
+#	endif
 #	if SPECIAL_TAGS
 		G2("Killing Floor"),
 #	endif
@@ -127,6 +130,7 @@ const GameInfo GListOfGames[] = {
 		G("Mortal Kombat vs. DC Universe", mk, GAME_MK),
 		G("Mortal Kombat", mk, GAME_MK),
 		G("Injustice: Gods Among Us", mk, GAME_MK),
+		G("Mortal Kombat X", mk, GAME_MK),
 #	endif
 #	if TUROK
 		G("Turok", turok, GAME_Turok),
@@ -166,6 +170,7 @@ const GameInfo GListOfGames[] = {
 		G("Batman: Arkham Asylum",  batman,  GAME_Batman),
 		G("Batman: Arkham City",    batman2, GAME_Batman2),
 		G("Batman: Arkham Origins", batman3, GAME_Batman3),
+		G("Batman: Arkham Knight",  batman4, GAME_Batman4),
 #	endif
 #	if CRIMECRAFT
 		G("Crime Craft", crime, GAME_CrimeCraft),
@@ -297,8 +302,9 @@ const GameInfo GListOfGames[] = {
 		G("Lost Planet 3", lp3, GAME_LostPlanet3),
 		G("Yaiba: Ninja Gaiden Z", lp3, GAME_LostPlanet3),
 #	endif
-#	if XCOM_BUREAU
+#	if XCOM
 		G("The Bureau: XCOM Declassified", xcom, GAME_XcomB),
+		G("XCOM 2", xcom2, GAME_Xcom2),
 #	endif
 #	if THIEF4
 		G("Thief", thief4, GAME_Thief4),
@@ -324,19 +330,44 @@ const GameInfo GListOfGames[] = {
 #	if GIGANTIC
 		G("Gigantic", gigantic, GAME_Gigantic),
 #	endif
+#	if METRO_CONF
+		G("Metro Conflict", metroconf, GAME_MetroConflict),
+#	endif
+#	if SMITE
+		G("SMITE", smite, GAME_Smite),
+#	endif
+#	if DEVILS_THIRD
+		G("Devil's Third", dev3rd, GAME_DevilsThird),
+#	endif
 #endif // UNREAL3
 
 	// Unreal engine 4
 #if UNREAL4
-		G("Unreal engine 4",   ue4,   GAME_UE4  ),		// useless?
-		G("Unreal engine 4.0", ue4.0, GAME_UE4_0),
-		G("Unreal engine 4.1", ue4.1, GAME_UE4_1),
-		G("Unreal engine 4.2", ue4.2, GAME_UE4_2),
-		G("Unreal engine 4.3", ue4.3, GAME_UE4_3),
-		G("Unreal engine 4.4", ue4.4, GAME_UE4_4),
-		G("Unreal engine 4.5", ue4.5, GAME_UE4_5),
-		G("Unreal engine 4.6", ue4.6, GAME_UE4_6),
-		G("Unreal engine 4.7", ue4.7, GAME_UE4_7),
+		// Dummy tag for all UE4 versions
+		{
+			"Unreal engine 4.0-4." STR(LATEST_SUPPORTED_UE4_VERSION),
+			"ue4.[0-" STR(LATEST_SUPPORTED_UE4_VERSION) "]",
+			GAME_UE4(LATEST_SUPPORTED_UE4_VERSION+1)	// some invalid version number, but not zero - to show this game in "-help" output
+		},
+		// Add custom UE4 versions here
+#	if GEARS4
+		G("Gears of War 4", gears4, GAME_Gears4),
+#	endif
+#	if FRIDAY13
+		G("Friday the 13th: The Game", friday13, GAME_Friday13),
+#	endif
+#	if TEKKEN7
+		G("Tekken 7", tekken7, GAME_Tekken7),
+#	endif
+#	if LAWBREAKERS
+		G("Lawbreakers", lawbr, GAME_Lawbreakers),
+#	endif
+#	if PARAGON
+		G("Paragon", paragon, GAME_Paragon),
+#	endif
+#	if HIT
+		G("Heroes of Incredible Tales", hit, GAME_HIT),
+#	endif
 #endif // UNREAL4
 
 	// end marker
@@ -364,7 +395,7 @@ const char *GetEngineName(int Game)
 	case GAME_UE3:
 	case GAME_MIDWAY3:
 		return "Unreal engine 3";
-	case GAME_UE4:
+	case GAME_UE4_BASE:
 		return "Unreal engine 4";
 	}
 	return "Unknown UE";
@@ -395,7 +426,7 @@ void PrintGameList(bool tags)
 		// game info
 		if (tags)
 		{
-			appPrintf("\n %8s  %s", info.Switch ? info.Switch : "", info.Name);
+			appPrintf("\n %12s  %s", info.Switch ? info.Switch : "", info.Name);
 			continue;
 		}
 		// simple game list
@@ -425,7 +456,63 @@ int FindGameTag(const char *name)
 		if (!key) continue;
 		if (!stricmp(key, name)) return GListOfGames[i].Enum;
 	}
+#if UNREAL4
+	// For UE4 games we use procedurally generated tags
+	if (!strnicmp(name, "ue4.", 4))
+	{
+		const char* ver = name + 4;
+		for (const char* s = ver; *s; s++)
+		{
+			if (!isdigit(*s))
+				return -1;
+		}
+		int nVer = atoi(ver);
+		if (nVer > LATEST_SUPPORTED_UE4_VERSION)
+		{
+			appPrintf("ERROR: provided game tag for UE4 version %d (%s), latest supported version is %d\n", nVer, name, LATEST_SUPPORTED_UE4_VERSION);
+			exit(1);
+		}
+		return GAME_UE4(nVer);
+	}
+#endif // UNREAL4
 	return -1;
+}
+
+const char* GetGameTag(int gameEnum)
+{
+	static char buf[64];
+
+	int Count = ARRAY_COUNT(GListOfGames) - 1;	// exclude TABLE_END marker
+	const char* value = NULL;
+	for (int i = 0; i < Count; i++)
+	{
+		if (GListOfGames[i].Enum == gameEnum)
+		{
+			value = GListOfGames[i].Switch;
+			break;
+		}
+	}
+#if UNREAL4
+	if (!value && gameEnum >= GAME_UE4_BASE)
+	{
+		// generate tag
+		int ue4ver = GAME_UE4_GET_MINOR(gameEnum);
+		if (gameEnum == GAME_UE4(ue4ver))
+		{
+			// exactly matching, i.e. not a custom UE4 version
+			appSprintf(ARRAY_ARG(buf), "ue4.%d", ue4ver);
+			return buf;
+		}
+	}
+#endif // UNREAL4
+
+	if (!value)
+	{
+		appSprintf(ARRAY_ARG(buf), "%X", gameEnum);
+		return buf;
+	}
+
+	return value;
 }
 
 
@@ -449,13 +536,7 @@ void FArchive::DetectGame()
 		return;
 	}
 
-	// different game platforms autodetection
-	//?? should change this, if will implement command line switch to force mode
-	//?? code moved here, check code of other structs loaded below for ability to use Ar.IsGameName...
-
-	//?? remove #if ... #endif guards - detect game even when its support is disabled
-
-	// check for already detected game
+	// check if already detected game requires some additional logic
 #if LINEAGE2 || EXTEEL
 	if (Game == GAME_Lineage2)
 	{
@@ -464,7 +545,9 @@ void FArchive::DetectGame()
 		return;
 	}
 #endif
-	if (Game != GAME_UNKNOWN)		// may be GAME_Ragnarok2
+
+	// skip autodetection when Ar.Game is explicitly set by SerializePackageFileSummary, when code detects custom package tag
+	if (Game != GAME_UNKNOWN)
 		return;
 
 	// here Game == GAME_UNKNOWN
@@ -517,7 +600,8 @@ void FArchive::DetectGame()
 #endif
 #if BIOSHOCK
 	if ( (ArVer == 141 && (ArLicenseeVer == 56 || ArLicenseeVer == 57)) || //?? Bioshock and Bioshock 2
-		 (ArVer == 143 && ArLicenseeVer == 59) )					// Bioshock 2 multiplayer?
+		 (ArVer == 142 && ArLicenseeVer == 56) ||					// Bioshock Remastered
+		 (ArVer == 143 && ArLicenseeVer == 59) )					// Bioshock 2 multiplayer, Bioshock 2 Remastered
 		SET(GAME_Bioshock);
 #endif
 
@@ -645,11 +729,13 @@ void FArchive::DetectGame()
 	if ( (ArVer == 806 || ArVer == 807) &&
 		 (ArLicenseeVer == 103 || ArLicenseeVer == 137 || ArLicenseeVer == 138) )
 		SET(GAME_Batman3);
+	if (ArVer == 863 && ArLicenseeVer == 32995)	SET(GAME_Batman4);
 #endif
 #if DMC
 	if (ArVer == 845 && ArLicenseeVer == 4)		SET(GAME_DmC);
 #endif
-#if XCOM_BUREAU
+#if XCOM
+	if (ArVer == 845 && (ArLicenseeVer >= 101 && ArLicenseeVer <= 107))	SET(GAME_Xcom2);
 	if (ArVer == 849 && ArLicenseeVer == 32795)	SET(GAME_XcomB);
 #endif
 #if FABLE
@@ -695,7 +781,8 @@ void FArchive::DetectGame()
 #if MKVSDC
 	if ( (ArVer == 402 && ArLicenseeVer == 30) ||		//!! has extra tag; MK vs DC
 		 (ArVer == 472 && ArLicenseeVer == 46) ||		// Mortal Kombat
-		 (ArVer == 573 && ArLicenseeVer == 49) )		// Injustice: God Among Us
+		 (ArVer == 573 && ArLicenseeVer == 49) ||		// Injustice: God Among Us
+		 (ArVer == 677 && ArLicenseeVer == 157) )		// Mortal Kombat X
 		SET(GAME_MK);
 #endif
 #if HUXLEY
@@ -738,9 +825,13 @@ void FArchive::DetectGame()
 	if ((ArVer == 832 || ArVer == 893) && ArLicenseeVer == 21)	// Remember Me (832) or Life Is Strange (893)
 		SET(GAME_RememberMe);
 #endif
+#if GIGANTIC
+	if (ArVer == 867 && ArLicenseeVer == 9)
+		SET(GAME_Gigantic);
+#endif
 
 	if (check > 1)
-		appNotify("DetectGame detected a few titles (%d): Ver=%d, LicVer=%d", check, ArVer, ArLicenseeVer);
+		appNotify("DetectGame collision: detected %d titles, Ver=%d, LicVer=%d", check, ArVer, ArLicenseeVer);
 
 	if (Game == GAME_UNKNOWN)
 	{
@@ -751,12 +842,15 @@ void FArchive::DetectGame()
 			Game = GAME_UE2;
 		else
 			Game = GAME_UE3;
+		// UE4 has version numbering from zero, plus is has "unversioned" packages, so GAME_UE4_BASE is set by
+		// FPackageFileSummary serializer explicitly.
 	}
 #undef SET
 }
 
 #define OVERRIDE_ME1_LVER		90			// real version is 1008, which is greater than LicenseeVersion of Mass Effect 2 and 3
 #define OVERRIDE_TRANSFORMERS3	566			// real version is 846
+#define OVERRIDE_DUNDEF_VER		685			// smaller than 686 (for FStaticLODModel)
 #define OVERRIDE_SF2_VER		700
 #define OVERRIDE_SF2_VER2		710
 #define OVERRIDE_LIS_VER		832			// >= 832 || < 858 (for UMaterial), < 841 (for USkeletalMesh)
@@ -769,8 +863,6 @@ struct UEVersionMap
 };
 
 #define G(game,ver)		{ game, ver },
-// Mapping between GAME_UE4_n and
-#define M(ver)			{ GAME_UE4_##ver, VER_UE4_##ver }
 
 static const UEVersionMap ueVersions[] =
 {
@@ -787,19 +879,69 @@ static const UEVersionMap ueVersions[] =
 	G(GAME_DND, 673)						// real version is 674
 #endif
 	G(GAME_GoWJ, 828)						// real version is 846
-
-	// Unreal engine 4
-#if UNREAL4
-	M(0), M(1), M(2), M(3), M(4), M(5), M(6), M(7)
-#endif
 };
 
 #undef G
-#undef M
 
+#if UNREAL4
+static const int ue4Versions[] =
+{
+	VER_UE4_0, VER_UE4_1, VER_UE4_2, VER_UE4_3, VER_UE4_4,
+	VER_UE4_5, VER_UE4_6, VER_UE4_7, VER_UE4_8, VER_UE4_9,
+	VER_UE4_10, VER_UE4_11, VER_UE4_12, VER_UE4_13, VER_UE4_14,
+	VER_UE4_15, VER_UE4_16, VER_UE4_17, VER_UE4_18, VER_UE4_19,
+	// NEW_ENGINE_VERSION
+};
+
+staticAssert(ARRAY_COUNT(ue4Versions) == LATEST_SUPPORTED_UE4_VERSION + 1, "ue4Versions[] is outdated");
+#endif // UNREAL4
 
 void FArchive::OverrideVersion()
 {
+	if (GForcePackageVersion)
+	{
+		ArVer = GForcePackageVersion;
+		return;
+	}
+
+#if UNREAL4
+#if LAWBREAKERS
+	if (Game == GAME_Lawbreakers)
+	{
+		// This game uses mostly UE4.13 structures, but has 4.14 package file format. So, game enum
+		// is defined as GAME_UE4(13), but we're defining package version 4.14.
+		ArVer = VER_UE4_14;
+	}
+	else
+#endif // LAWBREAKERS
+	if (Game >= GAME_UE4(0) && Game < GAME_UE4(LATEST_SUPPORTED_UE4_VERSION+1))
+	{
+		// Special path for UE4, when engine version is specified and packages are unversioned.
+		if (ArVer == 0)
+		{
+			// Override version only if package is unversioned. Mixed versioned and unversioned packages could
+			// appear in UE4 game when it has editor support (like UT4).
+			ArVer = ue4Versions[GAME_UE4_GET_MINOR(Game)];
+		}
+		return;
+	}
+/*	else if (Game == GAME_UE4_BASE && ArVer != 0) //-- disabled because versioned packages provides FCustomVersion info
+	{
+		// Path for UE4 when packages are versioned.
+		for (int i = ARRAY_COUNT(ue4Versions) - 1; i >= 0; i--)
+		{
+			printf("arv=%d ue4[%d]=%d\n", ArVer, i, ue4Versions[i]);
+			if (ArVer >= ue4Versions[i])
+			{
+				Game = GAME_UE4(i);
+				return;
+			}
+		}
+		return;
+	} */
+#endif // UNREAL4
+
+	// convert game tag to ArVer
 	int OldVer  = ArVer;
 	int OldLVer = ArLicenseeVer;
 
@@ -828,13 +970,6 @@ void FArchive::OverrideVersion()
 			ArVer = OVERRIDE_SF2_VER;
 	}
 #endif // SPECIALFORCE2
-#if ALICE
-	if (Game == GAME_Alice && GForceGame == GAME_UNKNOWN)
-	{
-		appPrintf("Forcing game set to Alice2\n");
-		GForceGame = GAME_Alice;
-	}
-#endif // ALICE
 #if REMEMBER_ME
 	if (Game == GAME_RememberMe)
 	{
@@ -842,7 +977,14 @@ void FArchive::OverrideVersion()
 			ArVer = OVERRIDE_LIS_VER;
 	}
 #endif // REMEMBER_ME
+#if DUNDEF
+	if (Game == GAME_DunDef)
+	{
+		if (ArVer >= 686)
+			ArVer = OVERRIDE_DUNDEF_VER;
+	}
+#endif // DUNDEF
 
-	if ((ArVer != OldVer || ArLicenseeVer != OldLVer) && Game < GAME_UE4)
+	if ((ArVer != OldVer || ArLicenseeVer != OldLVer) && Game < GAME_UE4_BASE)
 		appPrintf("Overrided version %d/%d -> %d/%d\n", OldVer, OldLVer, ArVer, ArLicenseeVer);
 }

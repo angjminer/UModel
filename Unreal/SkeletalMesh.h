@@ -1,5 +1,5 @@
-#ifndef __SKELETALMESH_H__
-#define __SKELETALMESH_H__
+#ifndef __SKELETAL_MESH_H__
+#define __SKELETAL_MESH_H__
 
 #include "MeshCommon.h"
 
@@ -28,12 +28,25 @@ TODO:
 
 #define MAX_MESHBONES				2048
 #define NUM_INFLUENCES				4
+//#define ANIM_DEBUG_INFO				1
 
 struct CSkelMeshVertex : public CMeshVertex
 {
-	//?? use short for Bone[] and byte for Weight[]
-	int						Bone[NUM_INFLUENCES];	// Bone < 0 - end of list
-	float					Weight[NUM_INFLUENCES];
+	uint32					PackedWeights;			// Works with 4 weights only!
+	int16					Bone[NUM_INFLUENCES];	// Bone < 0 - end of list
+
+	void UnpackWeights(CVec4& OutWeights) const
+	{
+#if USE_SSE
+		OutWeights.mm = UnpackPackedBytes(PackedWeights);
+#else
+		float Scale = 1.0f / 255;
+		OutWeights.v[0] =  (PackedWeights        & 0xFF) * Scale;
+		OutWeights.v[1] = ((PackedWeights >> 8 ) & 0xFF) * Scale;
+		OutWeights.v[2] = ((PackedWeights >> 16) & 0xFF) * Scale;
+		OutWeights.v[3] = ((PackedWeights >> 24) & 0xFF) * Scale;
+#endif
+	}
 };
 
 
@@ -46,18 +59,13 @@ struct CSkelMeshBone
 };
 
 
-struct CSkelMeshLod
+struct CSkelMeshLod : public CBaseMeshLod
 {
-	// generic properties
-	int						NumTexCoords;
-	bool					HasNormals;
-	bool					HasTangents;
-	// geometry
-	TArray<CMeshSection>	Sections;
 	CSkelMeshVertex			*Verts;
-	int						NumVerts;
-	CIndexBuffer			Indices;
 
+	CSkelMeshLod()
+	:	Verts(NULL)
+	{}
 	~CSkelMeshLod()
 	{
 		if (Verts) appFree(Verts);
@@ -83,6 +91,7 @@ struct CSkelMeshLod
 		assert(Verts == NULL);
 		Verts    = (CSkelMeshVertex*)appMalloc(sizeof(CSkelMeshVertex) * Count, 16);		// alignment for SSE
 		NumVerts = Count;
+		AllocateUVBuffers();
 		unguard;
 	}
 
@@ -103,6 +112,14 @@ struct CSkelMeshSocket
 	FName					Name;
 	FName					Bone;
 	CCoords					Transform;
+
+#if DECLARE_VIEWER_PROPS
+	DECLARE_STRUCT(CSkelMeshSocket)
+	BEGIN_PROP_TABLE
+		PROP_NAME(Name)
+		PROP_NAME(Bone)
+	END_PROP_TABLE
+#endif
 };
 
 
@@ -123,12 +140,21 @@ public:
 	:	OriginalMesh(Original)
 	{}
 
-	void FinalizeMesh()
+	void FinalizeMesh();
+
+#if RENDERING
+	void LockMaterials()
 	{
 		for (int i = 0; i < Lods.Num(); i++)
-			Lods[i].BuildNormals();
-		SortBones();
+			Lods[i].LockMaterials();
 	}
+
+	void UnlockMaterials()
+	{
+		for (int i = 0; i < Lods.Num(); i++)
+			Lods[i].UnlockMaterials();
+	}
+#endif
 
 	void SortBones();
 	int FindBone(const char *Name) const;
@@ -143,6 +169,8 @@ public:
 		PROP_VECTOR(MeshScale)
 		PROP_ROTATOR(RotOrigin)
 		VPROP_ARRAY_COUNT(RefSkeleton, BoneCount)
+		PROP_ARRAY(Sockets, CSkelMeshSocket)
+		VPROP_ARRAY_COUNT(Sockets, SocketCount)
 	END_PROP_TABLE
 private:
 	CSkeletalMesh()									// for InternalConstructor()
@@ -198,12 +226,16 @@ struct CAnimTrack
 };
 
 
-struct CAnimSequence
+class CAnimSequence
 {
+public:
 	FName					Name;					// sequence's name
 	int						NumFrames;
 	float					Rate;
 	TArray<CAnimTrack>		Tracks;					// for each CAnimSet.TrackBoneNames
+#if ANIM_DEBUG_INFO
+	FString					DebugInfo;
+#endif
 };
 
 
@@ -224,7 +256,7 @@ class CAnimSet
 public:
 	UObject					*OriginalAnim;			//?? make common for all mesh classes
 	TArray<FName>			TrackBoneNames;
-	TArray<CAnimSequence>	Sequences;
+	TArray<CAnimSequence*>	Sequences;
 
 	bool					AnimRotationOnly;
 	TArray<bool>			UseAnimTranslation;		// per bone; used with AnimRotationOnly mode
@@ -233,6 +265,12 @@ public:
 	CAnimSet(UObject *Original)
 	:	OriginalAnim(Original)
 	{}
+
+	~CAnimSet()
+	{
+		for (int i = 0; i < Sequences.Num(); i++)
+			delete Sequences[i];
+	}
 
 	bool ShouldAnimateTranslation(int BoneIndex, EAnimRotationOnly RotationMode = EARO_AnimSet) const
 	{
@@ -256,7 +294,8 @@ public:
 
 #define REGISTER_SKELMESH_VCLASSES \
 	REGISTER_CLASS(CMeshSection) \
-	REGISTER_CLASS(CSkelMeshLod)
+	REGISTER_CLASS(CSkelMeshLod) \
+	REGISTER_CLASS(CSkelMeshSocket)
 
 
-#endif // __SKELETALMESH_H__
+#endif // __SKELETAL_MESH_H__

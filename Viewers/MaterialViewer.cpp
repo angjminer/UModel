@@ -1,5 +1,6 @@
 #include "Core.h"
 #include "UnrealClasses.h"
+#include "MathSSE.h"			// for CVec4
 
 #if RENDERING
 
@@ -91,14 +92,16 @@ void CMaterialViewer::Draw3D(float TimeDelta)
 	UUnrealMaterial *Mat = static_cast<UUnrealMaterial*>(Object);
 	Mat->SetMaterial();
 
-	GLint aTangent = -1, aBinormal = -1;
-	bool hasTangent = false;
+	// check tangent space
+	GLint aNormal = -1;
+	GLint aTangent = -1;
+//	GLint aBinormal = -1;
 	const CShader *Sh = GCurrentShader;
 	if (Sh)
 	{
+		aNormal    = Sh->GetAttrib("normal");
 		aTangent   = Sh->GetAttrib("tangent");
-		aBinormal  = Sh->GetAttrib("binormal");
-		hasTangent = (aTangent >= 0 && aBinormal >= 0);
+//		aBinormal  = Sh->GetAttrib("binormal");
 	}
 
 	// and draw box ...
@@ -112,50 +115,45 @@ void CMaterialViewer::Draw3D(float TimeDelta)
 #define V101 { A, -A,  A}
 #define V110 { A,  A, -A}
 #define V111 { A,  A,  A}
-// normal
-#define NM00 {-1, 0, 0 }
-#define NP00 { 1, 0, 0 }
-#define N0M0 { 0,-1, 0 }
-#define N0P0 { 0, 1, 0 }
-#define N00M { 0, 0,-1 }
-#define N00P { 0, 0, 1 }
 	static const CVec3 box[] =
 	{
-		V001, V000, V010, V011,		// near   (x=0)
-		V111, V110,	V100, V101,		// far    (x=1)
-		V101, V100, V000, V001,		// left   (y=0)
-		V011, V010, V110, V111,		// right  (y=1)
-		V010, V000, V100, V110,		// bottom (z=0)
-		V001, V011, V111, V101,		// top    (z=1)
+		V001, V000, V010, V011,		// near   (x=-A)
+		V111, V110,	V100, V101,		// far    (x=+A)
+		V101, V100, V000, V001,		// left   (y=-A)
+		V011, V010, V110, V111,		// right  (y=+A)
+		V010, V000, V100, V110,		// bottom (z=-A)
+		V001, V011, V111, V101,		// top    (z=+A)
 #undef A
 	};
-	static const CVec3 normal[] =
+#define REP4(...)	{__VA_ARGS__},{__VA_ARGS__},{__VA_ARGS__},{__VA_ARGS__}
+	static const CVec4 normal[] =
 	{
-		NM00, NM00, NM00, NM00,
-		NP00, NP00, NP00, NP00,
-		N0M0, N0M0, N0M0, N0M0,
-		N0P0, N0P0, N0P0, N0P0,
-		N00M, N00M, N00M, N00M,
-		N00P, N00P, N00P, N00P
+		REP4(-1, 0, 0, 1 ),
+		REP4( 1, 0, 0, 1 ),
+		REP4( 0,-1, 0, 1 ),
+		REP4( 0, 1, 0, 1 ),
+		REP4( 0, 0,-1, 1 ),
+		REP4( 0, 0, 1, 1 )
 	};
 	static const CVec3 tangent[] =
 	{
-		N0P0, N0P0, N0P0, N0P0,
-		N0M0, N0M0, N0M0, N0M0,
-		NM00, NM00, NM00, NM00,
-		NP00, NP00, NP00, NP00,
-		NP00, NP00, NP00, NP00,
-		NM00, NM00, NM00, NM00
+		REP4( 0,-1, 0 ),
+		REP4( 0, 1, 0 ),
+		REP4( 1, 0, 0 ),
+		REP4(-1, 0, 0 ),
+		REP4( 1, 0, 0 ),
+		REP4(-1, 0, 0 )
 	};
-	static const CVec3 binormal[] =
-	{
-		N00P, N00P, N00P, N00P,
-		N00M, N00M, N00M, N00M,
-		N00M, N00M, N00M, N00M,
-		N00P, N00P, N00P, N00P,
-		N0M0, N0M0, N0M0, N0M0,
-		N0P0, N0P0, N0P0, N0P0
-	};
+//	static const CVec3 binormal[] =
+//	{
+//		REP4( 0, 0, 1 ),
+//		REP4( 0, 0, 1 ),
+//		REP4( 0, 0, 1 ),
+//		REP4( 0, 0, 1 ),
+//		REP4( 0,-1, 0 ),
+//		REP4( 0,-1, 0 )
+//	};
+#undef REP4
 	static const float tex[][2] =
 	{
 		{0, 0}, {0, 1}, {1, 1}, {1, 0},
@@ -175,34 +173,60 @@ void CMaterialViewer::Draw3D(float TimeDelta)
 		20,21,22,23
 	};
 
+#if 0
+	// verify tangents, should be suitable for binormal computation in shaders
+	// (note: we're not verifying correspondence with UV coordinates)
+	for (int i = 0; i < 24; i++)
+	{
+		CVec4 n4 = normal[i];
+		CVec3 n = n4.ToVec3();
+		CVec3 t = tangent[i];
+		CVec3 b = binormal[i];
+		CVec3 b2;
+		cross(n, t, b2);
+		VectorScale(b2, n4[3], b2);
+		float dd = VectorDistance(b2, b);
+		if (dd > 0.001f) appPrintf("dist[%d] = %g\n", i, dd);
+	}
+#endif
+
 	glEnableClientState(GL_VERTEX_ARRAY);
 	glEnableClientState(GL_TEXTURE_COORD_ARRAY);
 	glEnableClientState(GL_NORMAL_ARRAY);
-	if (hasTangent)
-	{
-		glEnableVertexAttribArray(aTangent);
-		glEnableVertexAttribArray(aBinormal);
-	}
 
 	glVertexPointer(3, GL_FLOAT, sizeof(CVec3), box);
-	glNormalPointer(GL_FLOAT, sizeof(CVec3), normal);
+	glNormalPointer(GL_FLOAT, sizeof(CVec4), normal);
 	glTexCoordPointer(2, GL_FLOAT, 0, tex);
-	if (hasTangent)
+
+	if (aNormal >= 0)
 	{
-		glVertexAttribPointer(aTangent,  3, GL_FLOAT, GL_FALSE, sizeof(CVec3), tangent);
-		glVertexAttribPointer(aBinormal, 3, GL_FLOAT, GL_FALSE, sizeof(CVec3), binormal);
+		glEnableVertexAttribArray(aNormal);
+		// send 4 components to decode binormal in shader
+		glVertexAttribPointer(aNormal, 4, GL_FLOAT, GL_FALSE, sizeof(CVec4), normal);
 	}
+	if (aTangent >= 0)
+	{
+		glEnableVertexAttribArray(aTangent);
+		glVertexAttribPointer(aTangent,  3, GL_FLOAT, GL_FALSE, sizeof(CVec3), tangent);
+	}
+//	if (aBinormal >= 0)
+//	{
+//		glEnableVertexAttribArray(aBinormal);
+//		glVertexAttribPointer(aBinormal, 3, GL_FLOAT, GL_FALSE, sizeof(CVec3), binormal);
+//	}
 
 	glDrawElements(GL_QUADS, ARRAY_COUNT(inds), GL_UNSIGNED_INT, inds);
 
 	glDisableClientState(GL_VERTEX_ARRAY);
 	glDisableClientState(GL_TEXTURE_COORD_ARRAY);
 	glDisableClientState(GL_NORMAL_ARRAY);
-	if (hasTangent)
-	{
+	// disable tangents
+	if (aNormal >= 0)
+		glDisableVertexAttribArray(aNormal);
+	if (aTangent >= 0)
 		glDisableVertexAttribArray(aTangent);
-		glDisableVertexAttribArray(aBinormal);
-	}
+//	if (aBinormal >= 0)
+//		glDisableVertexAttribArray(aBinormal);
 
 	BindDefaultMaterial(true);
 
@@ -260,7 +284,7 @@ void CMaterialViewer::Draw2D()
 	{
 		const UBitmapMaterial *Tex = static_cast<UBitmapMaterial*>(Object);
 
-		const char *fmt = EnumToName("ETextureFormat", Tex->Format);
+		const char *fmt = EnumToName(Tex->Format);
 		DrawTextLeft(S_GREEN "Width   :" S_WHITE " %d\n"
 					 S_GREEN "Height  :" S_WHITE " %d\n"
 					 S_GREEN "Format  :" S_WHITE " %s",
@@ -273,19 +297,22 @@ void CMaterialViewer::Draw2D()
 	{
 		const UTexture2D *Tex = static_cast<UTexture2D*>(Object);
 
-		const char *fmt = EnumToName("EPixelFormat", Tex->Format);
+		const char *fmt = EnumToName(Tex->Format);
 		DrawTextLeft(S_GREEN "Width   :" S_WHITE " %d\n"
 					 S_GREEN "Height  :" S_WHITE " %d\n"
 					 S_GREEN "Format  :" S_WHITE " %s\n"
 					 S_GREEN "TFCName :" S_WHITE " %s",
 					 Tex->SizeX, Tex->SizeY,
 					 fmt ? fmt : "???", *Tex->TextureFileCacheName);
-		// get first available mipmap
+		// get first available mipmap to find its size
+		//!! todo: use CTextureData for this to avoid any code copy-pastes
+		//!! also, display real texture format (TPF_...), again - with CTextureData use
+		const TArray<FTexture2DMipMap> *MipsArray = Tex->GetMipmapArray();
 		const FTexture2DMipMap *Mip = NULL;
-		for (int i = 0; i < Tex->Mips.Num(); i++)
-			if (Tex->Mips[i].Data.BulkData)
+		for (int i = 0; i < MipsArray->Num(); i++)
+			if ((*MipsArray)[i].Data.BulkData)
 			{
-				Mip = &Tex->Mips[i];
+				Mip = &(*MipsArray)[i];
 				break;
 			}
 		int width = 0, height = 0;
@@ -318,13 +345,14 @@ CMaterialViewer::CMaterialViewer(UUnrealMaterial* Material, CApplication* Window
 :	CObjectViewer(Material, Window)
 {
 	IsTexture = Material->IsTexture();
+	Material->Lock();
 }
 
 CMaterialViewer::~CMaterialViewer()
 {
 	guard(CMaterialViewer::~);
 	UUnrealMaterial *Mat = static_cast<UUnrealMaterial*>(Object);
-	Mat->Release();
+	Mat->Unlock();
 	unguard;
 }
 

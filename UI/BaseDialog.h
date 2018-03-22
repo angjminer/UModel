@@ -1,13 +1,9 @@
+// Simple UI library.
+// Copyright (C) 2018 Konstantin Nosov
+// Licensed under the BSD license. See LICENSE.txt file in the project root for full license information.
+
 #ifndef __BASE_DIALOG_H__
 #define __BASE_DIALOG_H__
-
-/*!! TODO:
-- TArray<FString>
-  - make StringArray class - TArray<const char*>
-    - will need a destructor
-  - possible improvements:
-    - add Reserve() for StringArray
-*/
 
 #include "Core.h"
 
@@ -45,6 +41,10 @@ public:
 
 	virtual const char* ClassName() const;
 
+	// Disable/enable window updates. Guaranteed for only one locked window at a time (WinAPI restriction)
+	void LockUpdate();
+	virtual void UnlockUpdate();
+
 	UIElement& Enable(bool enable);
 	FORCEINLINE bool IsEnabled() const   { return Enabled; }
 
@@ -54,6 +54,13 @@ public:
 	UIElement& SetParent(UIGroup* group);
 	FORCEINLINE HWND GetWnd() const      { return Wnd; }
 
+	UIBaseDialog* GetDialog();
+
+	virtual bool IsA(const char* type)
+	{
+		return !strcmp("UIElement", type);
+	}
+
 	// Layout functions
 
 	UIElement& SetRect(int x, int y, int width, int height);
@@ -61,6 +68,8 @@ public:
 	FORCEINLINE int GetHeight() const    { return Height; }
 
 	UIElement& SetMenu(UIMenu* menu);
+
+	void Repaint();
 
 	//!! add SetFontHeight(int)
 	/*	Also support bold-italic. Update 'Height' when AutoSize is set.
@@ -76,7 +85,7 @@ public:
 	static FORCEINLINE int EncodeWidth(float w)
 	{
 		w = bound(w, 0, 1);
-		int iw = w * 255.0f;			// float -> int
+		int iw = (int)(w * 255.0f);		// float -> int
 		return 0xFFFF0000 | iw;
 	}
 
@@ -88,7 +97,10 @@ public:
 		return (w & 0xFF) / 255.0f;		// w=-1 -> 1.0f
 	}
 
+	// Measure text size. There should be a single line of text.
 	void MeasureTextSize(const char* text, int* width, int* height = NULL, HWND wnd = 0);
+	// Measure text size. 'width' contains width limit for multiline text.
+	void MeasureTextVSize(const char* text, int* width, int* height = NULL, HWND wnd = 0);
 
 	friend UIElement& operator+(UIElement& elem, UIElement& next);
 
@@ -101,6 +113,7 @@ protected:
 	bool		IsRadioButton:1;
 	bool		Enabled;
 	bool		Visible;
+	bool		IsUpdateLocked;
 	UIGroup*	Parent;
 	UIElement*	NextChild;
 	UIMenu*		Menu;
@@ -166,6 +179,10 @@ protected:
 	typedef Base Super;								\
 public:												\
 	virtual const char* ClassName() const { return #Class; } \
+	virtual bool IsA(const char* type)				\
+	{												\
+		return !strcmp(#Class, type) || Super::IsA(type); \
+	}												\
 	FORCEINLINE ThisClass& SetRect(int x, int y, int width, int height) \
 	{ return (ThisClass&) Super::SetRect(x, y, width, height); } \
 	FORCEINLINE ThisClass& SetX(int x)               { X = x; return *this; } \
@@ -174,7 +191,8 @@ public:												\
 	FORCEINLINE ThisClass& SetHeight(int height)     { Height = height; return *this; } \
 	FORCEINLINE ThisClass& Enable(bool enable)       { return (ThisClass&) Super::Enable(enable); } \
 	FORCEINLINE ThisClass& Show(bool visible)        { return (ThisClass&) Super::Show(visible); } \
-	FORCEINLINE ThisClass& Expose(ThisClass*& var)   { var = this; return *this; } \
+	template<class T>								\
+	FORCEINLINE ThisClass& Expose(T*& var)           { var = this; return *this; } \
 	FORCEINLINE ThisClass& SetParent(UIGroup* group) { return (ThisClass&) Super::SetParent(group); } \
 	FORCEINLINE ThisClass& SetParent(UIGroup& group) { return (ThisClass&) Super::SetParent(&group); } \
 	FORCEINLINE ThisClass& SetMenu(UIMenu* menu)     { return (ThisClass&) Super::SetMenu(menu); } \
@@ -385,6 +403,9 @@ class UIMenuButton : public UIElement
 public:
 	UIMenuButton(const char* text);
 
+//	UIMenuButton& SetOK();
+//	UIMenuButton& SetCancel();
+
 protected:
 	FString		Label;
 
@@ -466,6 +487,10 @@ public:
 		return *this;
 	}
 
+	// This function may be used for creating text output window
+	void AppendText(const char* text);
+
+	// Set text in editor field. Passing NULL as text will just refresh value display.
 	void SetText(const char* text = NULL);
 	const char* GetText();
 
@@ -502,7 +527,7 @@ public:
 
 	FORCEINLINE const char* GetItem(int index) const
 	{
-		return Items[index];
+		return *Items[index];
 	}
 	FORCEINLINE int GetSelectionIndex() const
 	{
@@ -532,6 +557,8 @@ class UIListbox : public UIElement
 public:
 	UIListbox();
 
+	UIListbox& ReserveItems(int count);
+
 	UIListbox& AddItem(const char* item);
 	UIListbox& AddItems(const char** items);
 	void RemoveAllItems();
@@ -541,7 +568,7 @@ public:
 
 	FORCEINLINE const char* GetItem(int index) const
 	{
-		return Items[index];
+		return *Items[index];
 	}
 	FORCEINLINE int GetSelectionIndex() const
 	{
@@ -563,52 +590,76 @@ protected:
 
 //?? Probably rename to ListView? But we're supporting only "report" style, so it generally looks
 //?? like a Listbox with columns.
+// Ways of using UIMulticolumnListbox:
+// 1. Normal mode: create, add/remove items, display.
+//    Items are stored inside UIMulticolumnListbox. Win32 object contains placeholders - empty items.
+// 2. Virtual mode: create, SetVirtualMode, add/remove items, display.
+//    Items are stored inside UIMulticolumnListbox. Win32 object contains just number of items. Application
+//    works with UIMulticolumnListbox in this mode in exactly the same was as in "normal" mode, however
+//    work with control performed much faster.
+// 3. "True" virtual model with callbacks: create, SetVirtualMode, set callbacks. Set number of items, display.
+//    Items are stored on the side which created this control. UIMulticolumnListbox and Win32 objects
+//    both holds only items count. This is the fastest mode, with lowest possible memory requirement.
 class UIMulticolumnListbox : public UIElement
 {
 	DECLARE_UI_CLASS(UIMulticolumnListbox, UIElement);
-	DECLARE_CALLBACK(Callback, int);					// when single item selected (not for multiselect)
-	DECLARE_CALLBACK(SelChangedCallback);				// when selection changed
-	DECLARE_CALLBACK(DblClickCallback, int);			// when double-clicked an item
+	DECLARE_CALLBACK(Callback, int);							// when single item selected (not for multiselect)
+	DECLARE_CALLBACK(SelChangedCallback);						// when selection changed
+	DECLARE_CALLBACK(DblClickCallback, int);					// when double-clicked an item
+	DECLARE_CALLBACK(OnGetItemCount, int&);						// true virtual mode (#3): (int& OutItemCount)
+	DECLARE_CALLBACK(OnGetItemText, const char*&, int, int);	// true virtual mode (#3): (char*& OutText, int ItemIndex, int SubItemIndex)
+	DECLARE_CALLBACK(OnColumnClick, int);						// column clicked
 public:
 	static const int MAX_COLUMNS = 16;
 
 	UIMulticolumnListbox(int numColumns);
 
 	UIMulticolumnListbox& AddColumn(const char* title, int width = -1, ETextAlign align = TA_Left);
-
-	int AddItem(const char* item);
-	void AddSubItem(int itemIndex, int column, const char* text);
-	void RemoveItem(int itemIndex);
-	void RemoveAllItems();
-
 	UIMulticolumnListbox& AllowMultiselect() { Multiselect = true; return *this; }
+	UIMulticolumnListbox& SetVirtualMode() { IsVirtualMode = true; return *this; }
+	UIMulticolumnListbox& ShowSortArrow(int columnIndex, bool reverseSort);
+
+	UIMulticolumnListbox& ReserveItems(int count);					// not suitable for "true" virtual mode
+	int AddItem(const char* item);									// not suitable for "true" virtual mode
+	void AddSubItem(int itemIndex, int column, const char* text);	// not suitable for "true" virtual mode
+	void RemoveItem(int itemIndex);									// not suitable for "true" virtual mode
+	void RemoveAllItems();
 
 	// select an item; if index==-1, unselect all items; if add==true - extend current selection
 	// with this item (only when multiselect is enabled)
 	UIMulticolumnListbox& SelectItem(int index, bool add = false);
-	UIMulticolumnListbox& SelectItem(const char* item, bool add = false);
+	UIMulticolumnListbox& SelectItem(const char* item, bool add = false); // not suitable for "true" virtual mode
 	// unselect an item
 	UIMulticolumnListbox& UnselectItem(int index);
-	UIMulticolumnListbox& UnselectItem(const char* item);
+	UIMulticolumnListbox& UnselectItem(const char* item);			// not suitable for "true" virtual mode
 	UIMulticolumnListbox& UnselectAllItems();
 
-	FORCEINLINE int GetItemCount() const { return Items.Num() / NumColumns - 1; }
-	FORCEINLINE const char* GetItem(int itemIndex) const { return GetSumItem(itemIndex, 0); }
-	const char* GetSumItem(int itemIndex, int column) const;
+	int GetItemCount() const;
+	FORCEINLINE const char* GetItem(int itemIndex) const { return GetSubItem(itemIndex, 0); }
+	const char* GetSubItem(int itemIndex, int column) const;
+
+	FORCEINLINE bool IsTrueVirtualMode() const { return (OnGetItemCount != NULL) && (OnGetItemText != NULL); }
 
 	int GetSelectionIndex(int i = 0) const;							// returns -1 when no items selected
 	int GetSelectionCount() const { return SelectedItems.Num(); }	// returns 0 when no items selected
 
+	// UIElement functions
+	virtual void UnlockUpdate();
+
 protected:
+	bool		IsVirtualMode;
 	int			NumColumns;
 	int			ColumnSizes[MAX_COLUMNS];
 	ETextAlign	ColumnAlign[MAX_COLUMNS];
 	bool		Multiselect;
+	int			SortColumn;
+	bool		SortMode;
 
 	TArray<FString> Items;		// first NumColumns items - column headers, next NumColumns - 1st line, 2nd line, ...
 	TStaticArray<int, 32> SelectedItems;
 
 	void SetItemSelection(int index, bool select);
+	void UpdateListViewHeaderSort();
 
 	virtual void Create(UIBaseDialog* dialog);
 	virtual bool HandleCommand(int id, int cmd, LPARAM lParam);
@@ -639,21 +690,37 @@ public:
 
 	UITreeView& SelectItem(const char* item);
 
-	UITreeView& UseFolderIcons()          { DoUseFolderIcons = true; return *this; }
-	UITreeView& SetItemHeight(int value)  { ItemHeight = value; return *this;      }
+	UITreeView& UseFolderIcons()          { bUseFolderIcons = true; return *this; }
+	UITreeView& UseCheckboxes()           { bUseCheckboxes = true; return *this;  }
+	UITreeView& SetItemHeight(int value)  { ItemHeight = value; return *this;     }
+
+	// Checkbox management
+	void SetChecked(const char* item, bool checked = true);
+	bool GetChecked(const char* item);
+
+	void Expand(const char* item);
+	void CollapseAll();
+	void ExpandCheckedNodes();
 
 protected:
 	TArray<TreeViewItem*> Items;
 	FString		RootLabel;
 	TreeViewItem* SelectedItem;
 	int			ItemHeight;
-	bool		DoUseFolderIcons;		//!! awful name
+	bool		bUseFolderIcons;
+	bool		bUseCheckboxes;
+
+	TreeViewItem** HashTable;
+	static int GetHash(const char* text);
 
 	FORCEINLINE TreeViewItem* GetRoot() { return Items[0]; }
 
 	virtual void Create(UIBaseDialog* dialog);
 	virtual bool HandleCommand(int id, int cmd, LPARAM lParam);
 	void CreateItem(TreeViewItem& item);
+	TreeViewItem* FindItem(const char* item);
+	void UpdateCheckedStates();
+	virtual void DialogClosed(bool cancel);
 };
 
 
@@ -709,7 +776,7 @@ public:
 
 	UIMenuItem& Enable(bool enable);
 
-	const char* GetText() const { return Label; }
+	const char* GetText() const { return *Label; }
 	HMENU GetMenuHandle();
 
 	// Update checkboxes and radio groups according to attached variables
@@ -921,7 +988,7 @@ protected:
 
 	virtual void Create(UIBaseDialog* dialog);
 	virtual bool HandleCommand(int id, int cmd, LPARAM lParam);
-	virtual void DialogClosed(bool cancel);	//!! NOTE: this feature is not used now
+	virtual void DialogClosed(bool cancel);
 	virtual void UpdateEnabled();
 	virtual void UpdateVisible();
 
@@ -951,15 +1018,17 @@ class UICheckboxGroup : public UIGroup
 	DECLARE_CALLBACK(Callback, bool);
 public:
 	UICheckboxGroup(const char* label, bool value, unsigned flags = 0);
+	UICheckboxGroup(const char* label, bool* value, unsigned flags = 0);
 
 	bool IsChecked() const
 	{
-		return Value;
+		return *pValue;
 	}
 
 protected:
 	FString		Label;			// overrides Label of parent
-	bool		Value;
+	bool		bValue;			// local bool value
+	bool*		pValue;			// pointer to editable value
 	HWND		CheckboxWnd;	// checkbox window
 	HWND		DlgWnd;
 
@@ -1017,7 +1086,7 @@ public:
 	// Details: 'Escape' key is processed in PumpMessageLoop().
 	FORCEINLINE UIBaseDialog& CloseOnEsc()
 	{
-		DoCloseOnEsc = true;
+		ShouldCloseOnEsc = true;
 		return *this;
 	}
 
@@ -1047,8 +1116,9 @@ public:
 protected:
 	int			NextDialogId;
 	int			IconResId;
-	bool		DoCloseOnEsc;		//!! awful name
+	bool		ShouldCloseOnEsc;
 	UIBaseDialog* ParentDialog;
+	bool		IsDialogConstructed;	// true after InitUI() call
 
 	bool ShowDialog(bool modal, const char* title, int width, int height);
 
@@ -1058,7 +1128,23 @@ protected:
 
 	virtual void InitUI()
 	{}
+
+	// Virtual method which allows to prevent unwanted closing of dialog window. 'Cancel'
+	// parameter indicates if dialog is closed with 'Esc', 'Cancel' button or with 'x'
+	// (this is a parameter for CloseDialog() function passed here). This function should
+	// return 'false' to deny dialog disappearing.
+	virtual bool CanCloseDialog(bool cancel)
+	{
+		return true;
+	}
 };
+
+
+/*-----------------------------------------------------------------------------
+	Static stuff
+-----------------------------------------------------------------------------*/
+
+void UISetExceptionHandler(void (*Handler)());
 
 
 #endif // HAS_UI

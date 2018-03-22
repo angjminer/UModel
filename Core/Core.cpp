@@ -2,9 +2,9 @@
 
 #if _WIN32
 #include <direct.h>					// for mkdir()
-#else
-#include <sys/stat.h>				// for mkdir()
 #endif
+
+#include <sys/stat.h>				// for mkdir(), stat()
 
 #if VSTUDIO_INTEGRATION
 #define WIN32_LEAN_AND_MEAN			// exclude rarely-used services from windown headers
@@ -66,7 +66,7 @@ void appError(const char *fmt, ...)
 	THROW;
 #else
 	fprintf(stderr, "Fatal Error: %s\n", buf);
-	if (GLogFile) fprintf(stderr, "Fatal Error: %s\n", buf);
+	if (GLogFile) fprintf(GLogFile, "Fatal Error: %s\n", buf);
 	exit(1);
 #endif
 }
@@ -172,7 +172,7 @@ void appUnwindThrow(const char *fmt, ...)
 
 
 /*-----------------------------------------------------------------------------
-	Miscellaneous
+	String functions
 -----------------------------------------------------------------------------*/
 
 #define VA_GOODSIZE		512
@@ -311,7 +311,7 @@ const char *appStristr(const char *s1, const char *s2)
 	return s1 + (s - buf1);
 }
 
-static void NormalizeFilename(char *filename)
+void appNormalizeFilename(char *filename)
 {
 	char *src = filename;
 	char *dst = filename;
@@ -324,7 +324,251 @@ static void NormalizeFilename(char *filename)
 		*dst++ = prev = c;
 		if (!c) break;
 	}
+	if (--dst > filename)
+	{
+		// strip trailing slash, if one
+		if (*dst == '/') *dst = 0;
+	}
 }
+
+/*-----------------------------------------------------------------------------
+	Simple wildcard matching
+-----------------------------------------------------------------------------*/
+
+#if 0
+// Mask variants:
+// 1) *      - any file
+// 2) *.*    - any file
+// 3) *rest  - name ends with "rest" (for example, ".ext")
+// 4) start* - name starts with "start"
+// 4) text   - name equals "text"
+// Comparision is case-sensitive, when ignoreCase == false (default)
+// A few masks can be separated with ','
+bool appMatchWildcard(const char *name, const char *mask, bool ignoreCase)
+{
+	guard(appMatchWildcard);
+
+	if (!name[0] && !mask[0]) return true;		// empty strings matched
+
+	char NameCopy[1024], MaskCopy[1024];
+	if (ignoreCase)
+	{
+		appStrncpylwr(NameCopy, name, ARRAY_COUNT(NameCopy));
+		appStrncpylwr(MaskCopy, mask, ARRAY_COUNT(MaskCopy));
+	}
+	else
+	{
+		appStrncpyz(NameCopy, name, ARRAY_COUNT(NameCopy));
+		appStrncpyz(MaskCopy, mask, ARRAY_COUNT(MaskCopy));
+	}
+
+	int namelen = strlen(NameCopy);
+
+	// can use TStringSplitter here
+	const char *next;
+	for (mask = MaskCopy; mask; mask = next)
+	{
+		// find next wildcard (comma-separated)
+		next = strchr(mask, ',');
+		int masklen;
+		if (next)
+		{
+			masklen = next - mask;
+			next++;					// skip ','
+		}
+		else
+			masklen = strlen(mask);
+
+		if (!masklen)
+		{
+			// used something like "mask1,,mask3" (2nd mask is empty)
+//??		appPrintf("appMatchWildcard: skip empty mask in \"%s\"\n", mask);
+			continue;
+		}
+
+		// check for a trivial wildcard
+		if (mask[0] == '*')
+		{
+			if (masklen == 1 || (masklen == 3 && mask[1] == '.' && mask[2] == '*'))
+				return true;		// "*" or "*.*" -- any name valid
+		}
+
+		// "*text*" mask
+		if (masklen >= 3 && mask[0] == '*' && mask[masklen-1] == '*')
+		{
+			int		i;
+
+			mask++;
+			masklen -= 2;
+			for (i = 0; i <= namelen - masklen; i++)
+				if (!memcmp(&NameCopy[i], mask, masklen)) return true;
+		}
+		else
+		{
+			// "*text" or "text*" mask
+			const char *suff = strchr(mask, '*');
+			if (next && suff >= next) suff = NULL;		// suff can be in next wildcard
+			if (suff)
+			{
+				int preflen = suff - mask;
+				int sufflen = masklen - preflen - 1;
+				suff++;
+
+				if (namelen < preflen + sufflen)
+					continue;		// name is not long enough
+				if (preflen && memcmp(NameCopy, mask, preflen))
+					continue;		// different prefix
+				if (sufflen && memcmp(NameCopy + namelen - sufflen, suff, sufflen))
+					continue;		// different suffix
+
+				return true;
+			}
+			// exact match ("text")
+			if (namelen == masklen && !memcmp(NameCopy, mask, namelen))
+				return true;
+		}
+	}
+
+	return false;
+	unguard;
+}
+
+#else
+
+// Wildcard matching function from
+// http://www.drdobbs.com/architecture-and-design/matching-wildcards-an-empirical-way-to-t/240169123
+
+// This function compares text strings, one of which can have wildcards ('*' or '?').
+static bool WildTextCompare(
+	const char *pTameText,   // A string without wildcards
+	const char *pWildText    // A (potentially) corresponding string with wildcards
+)
+{
+	// These two values are set when we observe a wildcard character.  They
+	// represent the locations, in the two strings, from which we start once
+	// we've observed it.
+	const char *pTameBookmark = NULL;
+	const char *pWildBookmark = NULL;
+
+	// Walk the text strings one character at a time.
+	while (true)
+	{
+		// How do you match a unique text string?
+		if (*pWildText == '*')
+		{
+			// Easy: unique up on it!
+			while (*(++pWildText) == '*')
+			{
+			}                          // "xy" matches "x**y"
+
+			if (!*pWildText)
+			{
+				return true;           // "x" matches "*"
+			}
+
+			if (*pWildText != '?')
+			{
+				// Fast-forward to next possible match.
+				while (*pTameText != *pWildText)
+				{
+					if (!(*(++pTameText)))
+						return false;  // "x" doesn't match "*y*"
+				}
+			}
+
+			pWildBookmark = pWildText;
+			pTameBookmark = pTameText;
+		}
+		else if (*pTameText != *pWildText && *pWildText != '?')
+		{
+			// Got a non-match.  If we've set our bookmarks, back up to one
+			// or both of them and retry.
+			//
+			if (pWildBookmark)
+			{
+				if (pWildText != pWildBookmark)
+				{
+					pWildText = pWildBookmark;
+
+					if (*pTameText != *pWildText)
+					{
+						// Don't go this far back again.
+						pTameText = ++pTameBookmark;
+						continue;      // "xy" matches "*y"
+					}
+					else
+					{
+						pWildText++;
+					}
+				}
+
+				if (*pTameText)
+				{
+					pTameText++;
+					continue;          // "mississippi" matches "*sip*"
+				}
+			}
+
+			return false;              // "xy" doesn't match "x"
+		}
+
+		pTameText++;
+		pWildText++;
+
+		// How do you match a tame text string?
+		if (!*pTameText)
+		{
+			// The tame way: unique up on it!
+			while (*pWildText == '*')
+			{
+				pWildText++;           // "x" matches "x*"
+			}
+
+			if (!*pWildText)
+			{
+				return true;           // "x" matches "x"
+			}
+
+			return false;              // "x" doesn't match "xy"
+		}
+	}
+}
+
+bool appMatchWildcard(const char *name, const char *mask, bool ignoreCase)
+{
+	guard(appMatchWildcard);
+
+	if (!name[0] && !mask[0]) return true;		// empty strings matched
+
+	if (ignoreCase)
+	{
+		char NameCopy[1024], MaskCopy[1024];
+		appStrncpylwr(NameCopy, name, ARRAY_COUNT(NameCopy));
+		appStrncpylwr(MaskCopy, mask, ARRAY_COUNT(MaskCopy));
+		return WildTextCompare(NameCopy, MaskCopy);
+	}
+	else
+	{
+		return WildTextCompare(name, mask);
+	}
+
+	unguard;
+}
+
+#endif
+
+
+bool appContainsWildcard(const char *string)
+{
+	if (strchr(string, '*')) return true;
+	if (strchr(string, ',')) return true;
+	return false;
+}
+
+
+/*-----------------------------------------------------------------------------
+	File helpers
+-----------------------------------------------------------------------------*/
 
 void appMakeDirectory(const char *dirname)
 {
@@ -333,7 +577,7 @@ void appMakeDirectory(const char *dirname)
 	// so - we will create "a", then "a/b", then "a/b/c"
 	char Name[256];
 	appStrncpyz(Name, dirname, ARRAY_COUNT(Name));
-	NormalizeFilename(Name);
+	appNormalizeFilename(Name);
 
 	for (char *s = Name; /* empty */ ; s++)
 	{
@@ -357,7 +601,7 @@ void appMakeDirectoryForFile(const char *filename)
 {
 	char Name[256];
 	appStrncpyz(Name, filename, ARRAY_COUNT(Name));
-	NormalizeFilename(Name);
+	appNormalizeFilename(Name);
 
 	char *s = strrchr(Name, '/');
 	if (s)
@@ -365,4 +609,27 @@ void appMakeDirectoryForFile(const char *filename)
 		*s = 0;
 		appMakeDirectory(Name);
 	}
+}
+
+#ifndef S_ISDIR
+// no such declarations in windows headers, but exists in mingw32 ...
+#define	S_ISDIR(m)	(((m) & S_IFMT) == S_IFDIR)
+#define	S_ISREG(m)	(((m) & S_IFMT) == S_IFREG)
+#define stat _stati64
+#endif
+
+unsigned appGetFileType(const char *filename)
+{
+	char Name[256];
+	appStrncpyz(Name, filename, ARRAY_COUNT(Name));
+	appNormalizeFilename(Name);
+
+	struct stat buf;
+	if (stat(filename, &buf) == -1)
+		return 0;					// no such file/dir
+	if (S_ISDIR(buf.st_mode))
+		return FS_DIR;
+	else if (S_ISREG(buf.st_mode))
+		return FS_FILE;
+	return 0;						// just in case ... (may be, win32 have other file types?)
 }

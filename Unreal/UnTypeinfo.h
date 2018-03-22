@@ -157,8 +157,8 @@ public:
 		else
 			SuperField = SuperField2;	// serialized in parent
 #endif // UNREAL3
-#if MKVSDC
-		if (Ar.Game == GAME_MK && Ar.ArVer >= 472)
+#if MKVSDC || BATMAN
+		if ((Ar.Game == GAME_MK && Ar.ArVer >= 472) || (Ar.Game == GAME_Batman4))
 		{
 			Ar << Children;
 			return;				//!! remaining data will be dropped anyway
@@ -229,7 +229,7 @@ public:
 	int64			ProbeMask;
 	int64			IgnoreMask;
 	int				StateFlags;
-	word			LabelTableOffset;
+	uint16			LabelTableOffset;
 
 	virtual void Serialize(FArchive &Ar)
 	{
@@ -266,7 +266,7 @@ public:
 	unsigned		PropertyFlags2;	// uint64
 #endif
 	FName			Category;
-	word			f48;
+	uint16			f48;
 	FString			f64;
 #if UNREAL3
 	UObject			*unk60;			// UEnum, which constant is used to specify ArrayDim
@@ -279,7 +279,7 @@ public:
 #if LOST_PLANET3
 		if (Ar.Game == GAME_LostPlanet3 && Ar.ArLicenseeVer >= 79)
 		{
-			short Dim2;
+			int16 Dim2;
 			Ar << Dim2;
 			ArrayDim = Dim2;
 			goto flags;
@@ -308,7 +308,7 @@ public:
 		}
 #endif // BORDERLANDS
 #if BATMAN
-		if (Ar.Game == GAME_Batman2 || Ar.Game == GAME_Batman3)
+		if (Ar.Game >= GAME_Batman2 && Ar.Game <= GAME_Batman4)
 		{
 			// property flags constants were changed since ArLicenseeVer >= 101, performed conversion
 			// we need correct 0x20 value only
@@ -328,7 +328,7 @@ public:
 #if TNA_IMPACT
 		if (Ar.Game == GAME_TNA && PropertyFlags2 & 0x20)
 		{
-			word unk58;
+			uint16 unk58;
 			Ar << unk58;
 		}
 #endif // TNA_IMPACT

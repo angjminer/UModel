@@ -1,5 +1,5 @@
-#ifndef __UNARCHIVEOBB_H__
-#define __UNARCHIVEOBB_H__
+#ifndef __UNARCHIVE_OBB_H__
+#define __UNARCHIVE_OBB_H__
 
 #if SUPPORT_ANDROID
 
@@ -56,9 +56,10 @@ protected:
 class FObbVFS : public FVirtualFileSystem
 {
 public:
-	FObbVFS()
+	FObbVFS(const char* InFilename)
 	:	LastInfo(NULL)
 	,	Reader(NULL)
+	,	Filename(InFilename)
 	{}
 
 	virtual ~FObbVFS()
@@ -79,7 +80,7 @@ public:
 
 		int count;
 		*Reader << count;
-		FileInfos.Add(count);
+		FileInfos.AddZeroed(count);
 
 		for (int i = 0; i < count; i++)
 		{
@@ -134,6 +135,7 @@ public:
 	}
 
 protected:
+	FString				Filename;
 	FArchive*			Reader;
 	TArray<FObbEntry>	FileInfos;
 	FObbEntry*			LastInfo;			// cached last accessed file info, simple optimization
@@ -159,4 +161,4 @@ protected:
 
 #endif // SUPPORT_ANDROID
 
-#endif // __UNARCHIVEOBB_H__
+#endif // __UNARCHIVE_OBB_H__

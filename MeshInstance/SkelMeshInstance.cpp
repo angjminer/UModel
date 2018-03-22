@@ -52,7 +52,9 @@ struct CMeshBoneData
 struct CSkinVert
 {
 	CVecT		Position;
-	CVecT		Normal, Tangent, Binormal;
+	CVec4		Normal;				// force to have 4 components - W is used for binormal decoding
+	CVecT		Tangent;
+//	CVecT		Binormal;
 };
 
 
@@ -75,7 +77,7 @@ const char *CSkelMeshInstance::GetAnimName(int Index) const
 	guard(CSkelMeshInstance::GetAnimName);
 	if (Index < 0) return "None";
 	assert(Animation);
-	return Animation->Sequences[Index].Name;
+	return Animation->Sequences[Index]->Name;
 	unguard;
 }
 
@@ -104,6 +106,7 @@ CSkelMeshInstance::~CSkelMeshInstance()
 {
 	if (DataBlock) appFree(DataBlock);
 	if (InfColors) delete[] InfColors;
+	if (pMesh) pMesh->UnlockMaterials();
 }
 
 
@@ -171,22 +174,19 @@ void CSkelMeshInstance::SetMesh(CSkeletalMesh *Mesh)
 
 	int i;
 
+	assert(pMesh == NULL);
 	pMesh = Mesh;
+	pMesh->LockMaterials();
 
 	// orientation
 
-	SetAxis(pMesh->RotOrigin, BaseTransform.axis);
-	BaseTransform.origin[0] = pMesh->MeshOrigin[0] * pMesh->MeshScale[0];
-	BaseTransform.origin[1] = pMesh->MeshOrigin[1] * pMesh->MeshScale[1];
-	BaseTransform.origin[2] = pMesh->MeshOrigin[2] * pMesh->MeshScale[2];
-
-	BaseTransformScaled.axis = BaseTransform.axis;
+	RotatorToAxis(pMesh->RotOrigin, BaseTransformScaled.axis);
+	BaseTransformScaled.axis[0].Scale(pMesh->MeshScale[0]);
+	BaseTransformScaled.axis[1].Scale(pMesh->MeshScale[1]);
+	BaseTransformScaled.axis[2].Scale(pMesh->MeshScale[2]);
 	CVec3 tmp;
-	tmp[0] = 1.0f / pMesh->MeshScale[0];
-	tmp[1] = 1.0f / pMesh->MeshScale[1];
-	tmp[2] = 1.0f / pMesh->MeshScale[2];
-	BaseTransformScaled.axis.PrescaleSource(tmp);
-	BaseTransformScaled.origin = Mesh->MeshOrigin;
+	VectorNegate(pMesh->MeshOrigin, tmp);
+	BaseTransformScaled.axis.UnTransformVector(tmp, BaseTransformScaled.origin);
 
 	int NumBones = pMesh->RefSkeleton.Num();
 	int NumVerts = 0;
@@ -371,7 +371,7 @@ const CAnimSequence *CSkelMeshInstance::FindAnim(const char *AnimName) const
 		return NULL;
 	for (int i = 0; i < Animation->Sequences.Num(); i++)
 	{
-		const CAnimSequence &Seq = Animation->Sequences[i];
+		const CAnimSequence &Seq = *Animation->Sequences[i];
 		if (!stricmp(Seq.Name, AnimName))
 			return &Seq;
 	}
@@ -559,9 +559,8 @@ void CSkelMeshInstance::UpdateSkeleton()
 		// move bone position to global coordinate space
 		if (!i)
 		{
-			// root bone - use BaseTransform
-			// can use inverted BaseTransformScaled to avoid 'slow' operation
-			BaseTransformScaled.TransformCoordsSlow(BC, BC);
+			// root bone - use BaseTransformScaled
+			BaseTransformScaled.UnTransformCoords(BC, BC);
 		}
 		else
 		{
@@ -935,10 +934,12 @@ void CSkelMeshInstance::DrawAttachments()
 }
 
 
-// Software skinning
-void CSkelMeshInstance::TransformMesh()
+#if !USE_SSE
+
+// Software skinning - FPU version
+void CSkelMeshInstance::SkinMeshVerts()
 {
-	guard(CSkelMeshInstance::TransformMesh);
+	guard(CSkelMeshInstance::SkinMeshVerts);
 
 	const CSkelMeshLod& Mesh = pMesh->Lods[LodNum];
 	int NumVerts = Mesh.NumVerts;
@@ -950,26 +951,15 @@ void CSkelMeshInstance::TransformMesh()
 		const CSkelMeshVertex &V = Mesh.Verts[i];
 		CSkinVert             &D = Skinned[i];
 
+		CVec4 UnpackedWeights;
+		V.UnpackWeights(UnpackedWeights);
+
 		// compute weighted transform from all influenced bones
 
 		// take a 1st influence
-#if !USE_SSE
 		CCoords transform;
 		transform = BoneData[V.Bone[0]].Transform;
-		transform.Scale(V.Weight[0]);
-#else
-		const CCoords4 &transform = BoneData[V.Bone[0]].Transform4;
-		__m128 x1, x2, x3, x4, x5, x6, x7, x8;
-		x1 = transform.mm[0];					// bone transform
-		x2 = transform.mm[1];
-		x3 = transform.mm[2];
-		x4 = transform.mm[3];
-		x5 = _mm_load1_ps(&V.Weight[0]);		// Weight
-		x1 = _mm_mul_ps(x1, x5);				// Transform * Weight
-		x2 = _mm_mul_ps(x2, x5);
-		x3 = _mm_mul_ps(x3, x5);
-		x4 = _mm_mul_ps(x4, x5);
-#endif // USE_SSE
+		transform.Scale(UnpackedWeights.v[0]);
 		// add remaining influences
 		for (int j = 1; j < NUM_INFLUENCES; j++)
 		{
@@ -978,10 +968,71 @@ void CSkelMeshInstance::TransformMesh()
 			assert(iBone < pMesh->RefSkeleton.Num());	// validate bone index
 
 			const CMeshBoneData &data = BoneData[iBone];
-#if !USE_SSE
-			CoordsMA(transform, V.Weight[j], data.Transform);
-#else
-			x5 = _mm_load1_ps(&V.Weight[j]);	// Weight
+			CoordsMA(transform, UnpackedWeights.v[j], data.Transform);
+		}
+
+		// perform transformation
+
+		CVec3 UnpNormal, UnpTangent;
+//		CVec3 UnpBinormal;
+		Unpack(UnpNormal, V.Normal);
+		Unpack(UnpTangent, V.Tangent);
+//		Unpack(UnpBinormal, V.Binormal);
+		transform.UnTransformPoint(V.Position, D.Position);
+		transform.axis.UnTransformVector(UnpNormal, D.Normal);
+		transform.axis.UnTransformVector(UnpTangent, D.Tangent);
+//		transform.axis.UnTransformVector(UnpBinormal, D.Binormal);
+		// Preserve Normal.W to be able to compute binormal correctly
+		D.Normal.v[3] = V.Normal.GetW();
+	}
+
+	unguard;
+}
+
+#else // USE_SSE
+
+// Software skinning - SSE version
+void CSkelMeshInstance::SkinMeshVerts()
+{
+	guard(CSkelMeshInstance::SkinMeshVerts);
+
+	const CSkelMeshLod& Mesh = pMesh->Lods[LodNum];
+	int NumVerts = Mesh.NumVerts;
+
+	memset(Skinned, 0, sizeof(CSkinVert) * NumVerts);
+
+	for (int i = 0; i < NumVerts; i++)
+	{
+		const CSkelMeshVertex &V = Mesh.Verts[i];
+		CSkinVert             &D = Skinned[i];
+
+		CVec4 UnpackedWeights;
+		V.UnpackWeights(UnpackedWeights);
+
+		// compute weighted transform from all influenced bones
+
+		// take a 1st influence
+		const CCoords4 &transform = BoneData[V.Bone[0]].Transform4;
+		__m128 x1, x2, x3, x4, x5, x6, x7, x8;
+		x1 = transform.mm[0];					// bone transform
+		x2 = transform.mm[1];
+		x3 = transform.mm[2];
+		x4 = transform.mm[3];
+		x5 = _mm_load1_ps(&UnpackedWeights.v[0]);// Weight
+		x1 = _mm_mul_ps(x1, x5);				// Transform * Weight
+		x2 = _mm_mul_ps(x2, x5);
+		x3 = _mm_mul_ps(x3, x5);
+		x4 = _mm_mul_ps(x4, x5);
+
+		// add remaining influences
+		for (int j = 1; j < NUM_INFLUENCES; j++)
+		{
+			int iBone = V.Bone[j];
+			if (iBone < 0) break;
+			assert(iBone < pMesh->RefSkeleton.Num());	// validate bone index
+
+			const CMeshBoneData &data = BoneData[iBone];
+			x5 = _mm_load1_ps(&UnpackedWeights.v[j]);	// Weight
 			// x1..x4 += data.Transform * Weight
 			x6 = _mm_mul_ps(data.Transform4.mm[0], x5);
 			x1 = _mm_add_ps(x1, x6);
@@ -991,17 +1042,10 @@ void CSkelMeshInstance::TransformMesh()
 			x3 = _mm_add_ps(x3, x6);
 			x6 = _mm_mul_ps(data.Transform4.mm[3], x5);
 			x4 = _mm_add_ps(x4, x6);
-#endif // USE_SSE
 		}
 
 		// perform transformation
 
-#if !USE_SSE
-		transform.UnTransformPoint(V.Position, D.Position);
-		transform.axis.UnTransformVector(V.Normal, D.Normal);
-		transform.axis.UnTransformVector(V.Tangent, D.Tangent);
-		transform.axis.UnTransformVector(V.Binormal, D.Binormal);
-#else
 		// at this point we have x1..x4 = transform matrix
 
 #define TRANSFORM_POS(value)												\
@@ -1017,9 +1061,9 @@ void CSkelMeshInstance::TransformMesh()
 		x7 = _mm_mul_ps(x3, x6);											\
 		D.value.mm = _mm_add_ps(x8, x7);
 
-// version of code above, but without Transform.origin use
+// version of the code above, but without Transform.origin use
 #define TRANSFORM_NORMAL(value)												\
-		x5 = V.value.mm;													\
+		x5 = UnpackPackedChars(V.value.Data);								\
 		x6 = _mm_shuffle_ps(x5, x5, _MM_SHUFFLE(0,0,0,0));	/* X */			\
 		x8 = _mm_mul_ps(x1, x6);											\
 		x6 = _mm_shuffle_ps(x5, x5, _MM_SHUFFLE(1,1,1,1));	/* Y */			\
@@ -1032,12 +1076,16 @@ void CSkelMeshInstance::TransformMesh()
 		TRANSFORM_POS(Position);
 		TRANSFORM_NORMAL(Normal);
 		TRANSFORM_NORMAL(Tangent);
-		TRANSFORM_NORMAL(Binormal);
-#endif // USE_SSE
+//		TRANSFORM_NORMAL(Binormal);
+
+		// Preserve Normal.W to be able to compute binormal correctly
+		D.Normal.v[3] = V.Normal.GetW();
 	}
 
 	unguard;
 }
+
+#endif // USE_SSE
 
 
 void CSkelMeshInstance::DrawMesh(unsigned flags)
@@ -1056,7 +1104,7 @@ void CSkelMeshInstance::DrawMesh(unsigned flags)
 	if (!Mesh.HasTangents) Mesh.BuildTangents();
 
 #if 0
-	TransformMesh();
+	SkinMeshVerts();
 	glBegin(GL_POINTS);
 	for (i = 0; i < Mesh.NumVerts; i++)
 	{
@@ -1070,7 +1118,7 @@ void CSkelMeshInstance::DrawMesh(unsigned flags)
 #if PROFILE_MESH
 	int timeBeforeTransform = appMilliseconds();
 #endif
-	TransformMesh();
+	SkinMeshVerts();
 #if PROFILE_MESH
 	int timeAfterTransform = appMilliseconds();
 #endif
@@ -1106,7 +1154,14 @@ void CSkelMeshInstance::DrawMesh(unsigned flags)
 
 	glVertexPointer(3, GL_FLOAT, sizeof(CSkinVert), &Skinned[0].Position);
 	glNormalPointer(GL_FLOAT, sizeof(CSkinVert), &Skinned[0].Normal);
-	glTexCoordPointer(2, GL_FLOAT, sizeof(CSkelMeshVertex), &Mesh.Verts[0].UV[UVIndex].U);
+	if (UVIndex == 0)
+	{
+		glTexCoordPointer(2, GL_FLOAT, sizeof(CSkelMeshVertex), &Mesh.Verts[0].UV.U);
+	}
+	else
+	{
+		glTexCoordPointer(2, GL_FLOAT, sizeof(CMeshUVFloat), &Mesh.ExtraUV[UVIndex-1][0].U);
+	}
 
 	if (flags & DF_SHOW_INFLUENCES)
 	{
@@ -1142,22 +1197,32 @@ void CSkelMeshInstance::DrawMesh(unsigned flags)
 		if (!(flags & DF_SHOW_INFLUENCES))
 			SetMaterial(Sec.Material, MaterialIndex);
 		// check tangent space
-		GLint aTangent = -1, aBinormal = -1;
-		bool hasTangent = false;
+		GLint aNormal = -1;
+		GLint aTangent = -1;
+//		GLint aBinormal = -1;
 		const CShader *Sh = GCurrentShader;
 		if (Sh)
 		{
+			aNormal    = Sh->GetAttrib("normal");
 			aTangent   = Sh->GetAttrib("tangent");
-			aBinormal  = Sh->GetAttrib("binormal");
-			hasTangent = (aTangent >= 0 && aBinormal >= 0);
+//			aBinormal  = Sh->GetAttrib("binormal");
 		}
-		if (hasTangent)
+		if (aNormal >= 0)
+		{
+			glEnableVertexAttribArray(aNormal);
+			// send 4 components to decode binormal in shader
+			glVertexAttribPointer(aNormal, 4, GL_FLOAT, GL_FALSE, sizeof(CSkinVert), &Skinned[0].Normal);
+		}
+		if (aTangent >= 0)
 		{
 			glEnableVertexAttribArray(aTangent);
-			glEnableVertexAttribArray(aBinormal);
 			glVertexAttribPointer(aTangent,  3, GL_FLOAT, GL_FALSE, sizeof(CSkinVert), &Skinned[0].Tangent);
-			glVertexAttribPointer(aBinormal, 3, GL_FLOAT, GL_FALSE, sizeof(CSkinVert), &Skinned[0].Binormal);
 		}
+//		if (aBinormal >= 0)
+//		{
+//			glEnableVertexAttribArray(aBinormal);
+//			glVertexAttribPointer(aBinormal, 3, GL_FLOAT, GL_FALSE, sizeof(CSkinVert), &Skinned[0].Binormal);
+//		}
 		// draw
 		//?? place this code into CIndexBuffer?
 		//?? (the same code is in CStatMeshInstance)
@@ -1166,11 +1231,12 @@ void CSkelMeshInstance::DrawMesh(unsigned flags)
 		else
 			glDrawElements(GL_TRIANGLES, Sec.NumFaces * 3, GL_UNSIGNED_SHORT, &Mesh.Indices.Indices16[Sec.FirstIndex]);
 		// disable tangents
-		if (hasTangent)
-		{
+		if (aNormal >= 0)
+			glDisableVertexAttribArray(aNormal);
+		if (aTangent >= 0)
 			glDisableVertexAttribArray(aTangent);
-			glDisableVertexAttribArray(aBinormal);
-		}
+//		if (aBinormal >= 0)
+//			glDisableVertexAttribArray(aBinormal);
 	}
 
 	glDisableClientState(GL_VERTEX_ARRAY);
@@ -1213,32 +1279,41 @@ void CSkelMeshInstance::DrawMesh(unsigned flags)
 
 	if (flags & DF_SHOW_NORMALS)
 	{
+		//!! TODO: performance issues, see StatMeshInstance.cpp, DF_SHOW_NORMALS, for more details.
 		glBegin(GL_LINES);
 		glColor3f(0.5f, 1, 0);
+		const float VisualLength = 1.0f;
 		for (i = 0; i < NumVerts; i++)
 		{
-			glVertex3fv(Skinned[i].Position.v);
-			CVec3 tmp;
-			VectorMA(Skinned[i].Position, 1, Skinned[i].Normal, tmp);
+			const CSkinVert& vert = Skinned[i];
+			glVertex3fv(vert.Position.v);
+			CVecT tmp;
+			VectorMA(vert.Position, VisualLength, vert.Normal, tmp);
 			glVertex3fv(tmp.v);
 		}
 #if SHOW_TANGENTS
 		glColor3f(0, 0.5f, 1);
 		for (i = 0; i < NumVerts; i++)
 		{
-			const CVecT &v = Skinned[i].Position;
-			glVertex3fv(v.v);
+			const CSkinVert& vert = Skinned[i];
+			glVertex3fv(vert.Position.v);
 			CVecT tmp;
-			VectorMA(v, 1, Skinned[i].Tangent, tmp);
+			VectorMA(vert.Position, VisualLength, vert.Tangent, tmp);
 			glVertex3fv(tmp.v);
 		}
 		glColor3f(1, 0, 0.5f);
 		for (i = 0; i < NumVerts; i++)
 		{
-			const CVecT &v = Skinned[i].Position;
+			const CSkinVert& vert = Skinned[i];
+			// compute binormal
+			CVecT binormal;
+			cross(vert.Normal, vert.Tangent, binormal);
+			binormal.Scale(vert.Normal.v[3]);
+			// render
+			const CVecT &v = vert.Position;
 			glVertex3fv(v.v);
 			CVecT tmp;
-			VectorMA(v, 1, Skinned[i].Binormal, tmp);
+			VectorMA(v, VisualLength, binormal, tmp);
 			glVertex3fv(tmp.v);
 		}
 #endif // SHOW_TANGENTS
@@ -1304,10 +1379,12 @@ void CSkelMeshInstance::BuildInfColors()
 	for (i = 0; i < Lod.NumVerts; i++)
 	{
 		const CSkelMeshVertex &V = Lod.Verts[i];
+		CVec4 UnpackedWeights;
+		V.UnpackWeights(UnpackedWeights);
 		for (int j = 0; j < NUM_INFLUENCES; j++)
 		{
 			if (V.Bone[j] < 0) break;
-			VectorMA(InfColors[i], V.Weight[j], BoneColors[V.Bone[j]]);
+			VectorMA(InfColors[i], UnpackedWeights.v[j], BoneColors[V.Bone[j]]);
 		}
 	}
 

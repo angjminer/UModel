@@ -2,6 +2,7 @@
 
 #if _WIN32
 #include <direct.h>					// getcwd
+#include <signal.h>					// abort handler
 #else
 #include <unistd.h>					// getcwd
 #endif
@@ -114,6 +115,9 @@ BEGIN_CLASS_TABLE
 #if TRANSFORMERS
 	REGISTER_MESH_CLASSES_TRANS
 #endif
+#if MKVSDC
+	REGISTER_MESH_CLASSES_MK
+#endif
 END_CLASS_TABLE
 #endif // UNREAL3
 }
@@ -124,7 +128,9 @@ static void RegisterUnrealClasses4()
 #if UNREAL4
 BEGIN_CLASS_TABLE
 	REGISTER_MESH_CLASSES_U4
+	REGISTER_MATERIAL_CLASSES_U4
 END_CLASS_TABLE
+	REGISTER_MATERIAL_ENUMS_U4
 #endif // UNREAL4
 }
 
@@ -139,6 +145,9 @@ BEGIN_CLASS_TABLE
 #endif
 #if TRANSFORMERS
 	REGISTER_SOUND_CLASSES_TRANS
+#endif
+#if UNREAL4
+	REGISTER_SOUND_CLASSES_UE4
 #endif
 END_CLASS_TABLE
 }
@@ -162,7 +171,7 @@ static void RegisterClasses(int game)
 	{
 		RegisterUnrealClasses2();
 	}
-	else if (game < GAME_UE4)
+	else if (game < GAME_UE4_BASE)
 	{
 		RegisterUnrealClasses3();
 		RegisterUnreal3rdPartyClasses();
@@ -274,6 +283,17 @@ static void ExportAnimSet(const UAnimSet *Anim)
 }
 #endif // UNREAL3
 
+#if UNREAL4
+static void ExportSkeleton(const USkeleton *Skeleton)
+{
+	assert(Skeleton->ConvertedAnim);
+	if (!GSettings.ExportMd5Mesh)
+		ExportPsa(Skeleton->ConvertedAnim);
+	else
+		ExportMd5Anim(Skeleton->ConvertedAnim);
+}
+#endif // UNREAL4
+
 static void RegisterExporters()
 {
 	RegisterExporter("SkeletalMesh",  ExportSkeletalMesh2);
@@ -282,10 +302,10 @@ static void RegisterExporters()
 	RegisterExporter("SkeletalMesh3", ExportSkeletalMesh3);
 	RegisterExporter("AnimSet",       ExportAnimSet      );
 #endif
-	RegisterExporter("VertMesh",      Export3D         );
-	RegisterExporter("StaticMesh",    ExportStaticMesh2);
-	RegisterExporter("Texture",       ExportTexture    );
-	RegisterExporter("Sound",         ExportSound      );
+	RegisterExporter("VertMesh",      Export3D           );
+	RegisterExporter("StaticMesh",    ExportStaticMesh2  );
+	RegisterExporter("Texture",       ExportTexture      );
+	RegisterExporter("Sound",         ExportSound        );
 #if UNREAL3
 	RegisterExporter("StaticMesh3",   ExportStaticMesh3  );
 	RegisterExporter("Texture2D",     ExportTexture      );
@@ -297,8 +317,10 @@ static void RegisterExporters()
 #if UNREAL4
 	RegisterExporter("SkeletalMesh4", ExportSkeletalMesh4);
 	RegisterExporter("StaticMesh4",   ExportStaticMesh4  );
-#endif
-	RegisterExporter("UnrealMaterial", ExportMaterial);			// register this after Texture/Texture2D exporters
+	RegisterExporter("Skeleton",      ExportSkeleton     );
+	RegisterExporter("SoundWave",     ExportSoundWave4   );
+#endif // UNREAL4
+	RegisterExporter("UnrealMaterial", ExportMaterial    );			// register this after Texture/Texture2D exporters
 }
 
 
@@ -332,11 +354,18 @@ static void PrintUsage()
 	appPrintf(
 			"UE viewer / exporter\n"
 			"Usage: umodel [command] [options] <package> [<object> [<class>]]\n"
+#if HAS_UI
+			"       umodel [command] [options] <directory>\n"
+#endif
 			"\n"
-			"    <package>       name of package to load, without file extension\n"
+			"    <package>       name of package to load - this could be a file name\n"
+			"                    with or without extension, or wildcard\n"
 			"    <object>        name of object to load\n"
 			"    <class>         class of object to load (useful, when trying to load\n"
 			"                    object with ambiguous name)\n"
+#if HAS_UI
+			"    <directory>     path to the game (see -path option)\n"
+#endif
 			"\n"
 			"Commands:\n"
 			"    -view           (default) visualize object; when no <object> specified\n"
@@ -362,11 +391,14 @@ static void PrintUsage()
 			"    -path=PATH      path to game installation directory; if not specified,\n"
 			"                    program will search for packages in current directory\n"
 			"    -game=tag       override game autodetection (see -taglist for variants)\n"
+			"    -pkgver=nnn     override package version (advanced option!)\n"
 			"    -pkg=package    load extra package (in addition to <package>)\n"
 			"    -obj=object     specify object(s) to load\n"
 #if HAS_UI
 			"    -gui            force startup UI to appear\n" //?? debug-only option?
 #endif
+			"    -aes=key        provide AES decryption key for encrypted pak files,\n"
+			"                    key is ASCII or hex string (hex format is 0xAABBCCDD)\n"
 			"\n"
 			"Compatibility options:\n"
 			"    -nomesh         disable loading of SkeletalMesh classes in a case of\n"
@@ -382,6 +414,7 @@ static void PrintUsage()
 			"Platform selection:\n"
 			"    -ps3            override platform autodetection to PS3\n"
 			"    -ios            set platform to iOS (iPhone/iPad)\n"
+			"    -android        set platform to Android\n"
 			"\n"
 			"Viewer options:\n"
 			"    -meshes         view meshes only\n"
@@ -391,8 +424,8 @@ static void PrintUsage()
 			"Export options:\n"
 			"    -out=PATH       export everything into PATH instead of the current directory\n"
 			"    -all            export all linked objects too\n"
-			"    -uncook         use original package name as a base export directory\n"
-			"    -groups         use group names instead of class names for directories\n"
+			"    -uncook         use original package name as a base export directory (UE1-3)\n"
+			"    -groups         use group names instead of class names for directories (UE1-3)\n"
 			"    -uc             create unreal script when possible\n"
 //			"    -pskx           use pskx format for skeletal mesh\n"
 			"    -md5            use md5mesh/md5anim format for skeletal mesh\n"
@@ -559,6 +592,8 @@ static bool ProcessOption(const OptionInfo *Info, int Count, const char *Option)
 static void SetPathOption(FString& where, const char* value)
 {
 	// determine whether absolute path is used
+	const char* value2;
+
 #if _WIN32
 	int isAbsPath = (value[0] != 0) && (value[1] == ':');
 #else
@@ -566,23 +601,37 @@ static void SetPathOption(FString& where, const char* value)
 #endif
 	if (isAbsPath)
 	{
-		where = value;
-		return;
+		value2 = value;
 	}
-	// relative path
-	char path[512];
-	if (!getcwd(ARRAY_ARG(path)))
-		strcpy(path, ".");	// path is too long, or other error occured
-
-	if (!value || !value[0])
+	else
 	{
-		where = path;
-		return;
+		// relative path
+		char path[512];
+		if (!getcwd(ARRAY_ARG(path)))
+			strcpy(path, ".");	// path is too long, or other error occured
+
+		if (!value || !value[0])
+		{
+			value2 = path;
+		}
+		else
+		{
+			char buffer[512];
+			appSprintf(ARRAY_ARG(buffer), "%s/%s", path, value);
+			value2 = buffer;
+		}
 	}
 
-	char buffer[512];
-	appSprintf(ARRAY_ARG(buffer), "%s/%s", path, value);
-	where = buffer;
+	char finalName[512];
+	appStrncpyz(finalName, value2, ARRAY_COUNT(finalName)-1);
+	appNormalizeFilename(finalName);
+
+	where = finalName;
+
+	// strip possible trailing double quote
+	int len = where.Len();
+	if (len > 0 && where[len-1] == '"')
+		where.RemoveAt(len-1);
 }
 
 // Display error message about wrong command line and then exit.
@@ -595,9 +644,103 @@ static void CommandLineError(const char *fmt, ...)
 	va_end(argptr);
 	if (len < 0 || len >= sizeof(buf) - 1) exit(1);
 
-	appPrintf("%s\nTry \"umodel -help\" for more information.\n", buf);
+	appPrintf("UModel: bad command line: %s\nTry \"umodel -help\" for more information.\n", buf);
 	exit(1);
 }
+
+// forward
+void UISetExceptionHandler(void (*Handler)());
+
+static void ExceptionHandler()
+{
+	FFileWriter::CleanupOnError();
+	if (GErrorHistory[0])
+	{
+//		appPrintf("ERROR: %s\n", GErrorHistory);
+		appNotify("ERROR: %s\n", GErrorHistory);
+	}
+	else
+	{
+//		appPrintf("Unknown error\n");
+		appNotify("Unknown error\n");
+	}
+	#if HAS_UI
+	if (GApplication.GuiShown)
+		GApplication.ShowErrorDialog();
+	#endif // HAS_UI
+	exit(1);
+}
+
+#if _WIN32
+// AbortHandler on linux will cause infinite recurse, but works well on Windows
+static void AbortHandler(int signal)
+{
+	appError("abort() called");
+}
+#endif
+
+#if UNREAL4
+
+int UE4UnversionedPackage(int verMin, int verMax)
+{
+#if HAS_UI
+	int version = GApplication.ShowUE4UnversionedPackageDialog(verMin, verMax);
+	if (version >= 0) return version;
+#endif
+	appError("Unversioned UE4 packages are not supported. Please restart UModel and select UE4 version in range %d-%d using UI or command line.", verMin, verMax);
+	return -1;
+}
+
+static void CheckHexAesKey()
+{
+#define ishex(c)		( (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') )
+#define hextodigit(c)	( (c >= 'a') ? c - 'a' + 10 : c - '0' )
+
+	if (GAesKey.Len() < 3) return;
+	const char* s = *GAesKey;
+
+	// Hex key starts with "0x"
+	if (*s++ != '0') return;
+	if (tolower(*s++) != 'x') return;
+
+	FString NewKey;
+	NewKey.Empty(GAesKey.Len() / 2 + 1);
+
+	int remains = GAesKey.Len() - 2;
+	while (remains > 0)
+	{
+		uint8 b = 0;
+		if ((remains & 1) == 0)
+		{
+			// this code will not be executed only in a case of odd character count, for the first char
+			char c = tolower(*s++);
+			if (!ishex(c)) return;
+			b = hextodigit(c) << 4;
+			remains--;
+		}
+		char c = tolower(*s++);
+		if (!ishex(c)) return;
+		b |= hextodigit(c);
+		remains--;
+
+		NewKey.AppendChar((char)b);
+	}
+
+	GAesKey = NewKey;
+}
+
+bool UE4EncryptedPak()
+{
+#if HAS_UI
+	GAesKey = GApplication.ShowUE4AesKeyDialog();
+	CheckHexAesKey();
+	return GAesKey.Len() > 0;
+#else
+	return false;
+#endif
+}
+
+#endif // UNREAL4
 
 
 #define OPT_BOOL(name,var)				{ name, (byte*)&var, true  },
@@ -610,6 +753,10 @@ int main(int argc, char **argv)
 
 #if DO_GUARD
 	TRY {
+#endif
+
+#if _WIN32
+	signal(SIGABRT, AbortHandler);
 #endif
 
 	guard(Main);
@@ -636,7 +783,7 @@ int main(int argc, char **argv)
 
 	static byte mainCmd = CMD_View;
 	static bool exprtAll = false, hasRootDir = false, forceUI = false;
-	TArray<const char*> extraPackages, objectsToLoad;
+	TArray<const char*> packagesToLoad, objectsToLoad;
 	TArray<const char*> params;
 	const char *attachAnimName = NULL;
 	for (int arg = 1; arg < argc; arg++)
@@ -644,7 +791,7 @@ int main(int argc, char **argv)
 		const char *opt = argv[arg];
 		if (opt[0] != '-')
 		{
-			params.AddItem(opt);
+			params.Add(opt);
 			continue;
 		}
 
@@ -688,6 +835,7 @@ int main(int argc, char **argv)
 			// platform
 			OPT_VALUE("ps3",     GSettings.Platform, PLATFORM_PS3)
 			OPT_VALUE("ios",     GSettings.Platform, PLATFORM_IOS)
+			OPT_VALUE("android", GSettings.Platform, PLATFORM_ANDROID)
 			// compression
 			OPT_VALUE("lzo",     GSettings.PackageCompression, COMPRESS_LZO )
 			OPT_VALUE("zlib",    GSettings.PackageCompression, COMPRESS_ZLIB)
@@ -719,25 +867,40 @@ int main(int argc, char **argv)
 			}
 			GSettings.GameOverride = tag;
 		}
+		else if (!strnicmp(opt, "pkgver=", 7))
+		{
+			int ver = atoi(opt+7);
+			if (ver < 1)
+			{
+				appPrintf("ERROR: pkgver number is not valid: %s\n", opt+7);
+				exit(0);
+			}
+			GForcePackageVersion = ver;
+		}
 		else if (!strnicmp(opt, "pkg=", 4))
 		{
 			const char *pkg = opt+4;
-			extraPackages.AddItem(pkg);
+			packagesToLoad.Add(pkg);
 		}
 		else if (!strnicmp(opt, "obj=", 4))
 		{
 			const char *obj = opt+4;
-			objectsToLoad.AddItem(obj);
+			objectsToLoad.Add(obj);
 		}
 		else if (!strnicmp(opt, "anim=", 5))
 		{
 			const char *obj = opt+5;
-			objectsToLoad.AddItem(obj);
+			objectsToLoad.Add(obj);
 			attachAnimName = obj;
 		}
 		else if (!stricmp(opt, "3rdparty"))
 		{
 			GSettings.UseScaleForm = GSettings.UseFaceFx = true;
+		}
+		else if (!strnicmp(opt, "aes=", 4))
+		{
+			GAesKey = opt+4;
+			CheckHexAesKey();
 		}
 		// information commands
 		else if (!stricmp(opt, "taglist"))
@@ -757,20 +920,34 @@ int main(int argc, char **argv)
 		}
 		else
 		{
-			CommandLineError("umodel: invalid option: %s", opt);
+			CommandLineError("invalid option: -%s", opt);
 		}
 	}
 
+	// Parse UMODEL [package_name [obj_name [class_name]]]
 	const char *argPkgName   = (params.Num() >= 1) ? params[0] : NULL;
 	const char *argObjName   = (params.Num() >= 2) ? params[1] : NULL;
 	const char *argClassName = (params.Num() >= 3) ? params[2] : NULL;
 	if (params.Num() > 3)
 	{
-		CommandLineError("umodel: too many arguments, please check your command line.\nYou specified: package=%s, object=%s, class=%s",
+		CommandLineError("too many arguments, please check your command line.\nYou specified: package=%s, object=%s, class=%s",
 			argPkgName, argObjName, argClassName);
 	}
 
 #if HAS_UI
+	if (argPkgName && !argObjName && !argClassName && !hasRootDir)
+	{
+		// only 1 parameter has been specified - check if this is a directory name
+		// note: this is only meaningful for UI version of umodel, because there's nothing to
+		// do with directory without UI
+		if (appGetFileType(argPkgName) == FS_DIR)
+		{
+			SetPathOption(GSettings.GamePath, argPkgName);
+			hasRootDir = true;
+			argPkgName = NULL;
+		}
+	}
+
 	if (argc < 2 || (!hasRootDir && !argPkgName) || forceUI)
 	{
 		// fill game path with current directory, if it's empty - for easier work with UI
@@ -785,37 +962,35 @@ int main(int argc, char **argv)
 #endif // HAS_UI
 
 	// apply some GSettings
+	GForceGame = GSettings.GameOverride;	// force game fore scanning any game files
 	if (hasRootDir)
-		appSetRootDirectory(GSettings.GamePath);
-	GForceGame = GSettings.GameOverride;
+		appSetRootDirectory(*GSettings.GamePath);
 	GForcePlatform = GSettings.Platform;
 	GForceCompMethod = GSettings.PackageCompression;
 	if (GSettings.ExportPath.IsEmpty())
 		SetPathOption(GSettings.ExportPath, "UmodelExport");	//!! linux: ~/UmodelExport
-	appSetBaseExportDirectory(GSettings.ExportPath);
+	appSetBaseExportDirectory(*GSettings.ExportPath);
 
 	TArray<UnPackage*> Packages;
 	TArray<UObject*> Objects;
 
-#if !HAS_UI
-	if (!argPkgName || !params.Num())
+	if (argPkgName)
 	{
-		CommandLineError("umodel: package name was not specified.");
+		packagesToLoad.Insert(argPkgName, 0);
+		// don't use argPkgName beyond this point
 	}
-#else
-	if (!argPkgName)
-	{
-		if (!GApplication.ShowPackageUI())
-			return 0;		// user has cancelled the dialog when it appears for the first time
-		goto main_loop;
-	}
-#endif // !HAS_UI
-
 	if (argObjName)
 	{
-		objectsToLoad.Insert(0);
-		objectsToLoad[0] = argObjName;
+		objectsToLoad.Insert(argObjName, 0);
+		// don't use argObjName beyond this point
 	}
+
+#if !HAS_UI
+	if (!packagesToLoad.Num() || !params.Num())
+	{
+		CommandLineError("package name was not specified.");
+	}
+#endif // !HAS_UI
 
 	// load the package
 
@@ -824,17 +999,20 @@ int main(int argc, char **argv)
 #endif
 
 	// setup NotifyInfo to describe package only
-	appSetNotifyHeader(argPkgName);
+	if (packagesToLoad.Num() == 1)
+		appSetNotifyHeader(argPkgName);
+
 	// setup root directory
-	if (!hasRootDir)
+	if (!hasRootDir && packagesToLoad.Num())
 	{
 		//!! - place this code before UIStartupDialog, set game path in options so UI
 		//!!   could pick it up
 		//!! - appSetRootDirectory2(): replace with appGetRootDirectoryFromFile() + appSetRootDirectory()
-		if (strchr(argPkgName, '/') || strchr(argPkgName, '\\'))
+		const char* packageName = packagesToLoad[0];
+		if (strchr(packageName, '/') || strchr(packageName, '\\'))
 		{
 			// has path in filename
-			appSetRootDirectory2(argPkgName);
+			appSetRootDirectory2(packageName);
 		}
 		else
 		{
@@ -842,19 +1020,61 @@ int main(int argc, char **argv)
 			appSetRootDirectory(".");		// scan for packages
 		}
 	}
-
-	// load main package
-	UnPackage *MainPackage = UnPackage::LoadPackage(argPkgName);
-	if (!MainPackage)
+	else if (!hasRootDir)
 	{
-		appPrintf("ERROR: unable to find/load package %s\n", argPkgName);
-		exit(1);
+		// no packages were specified
+		appSetRootDirectory(".");			// scan for packages
 	}
+
+	// Try to load all packages first.
+	// Note: in this code, packages will be loaded without creating any exported objects.
+	for (int i = 0; i < packagesToLoad.Num(); i++)
+	{
+//		UnPackage *Package = UnPackage::LoadPackage(packagesToLoad[i]);
+		TStaticArray<const CGameFileInfo*, 32> Files;
+		appFindGameFiles(packagesToLoad[i], Files);
+
+		if (!Files.Num())
+		{
+			appPrintf("WARNING: unable to find package %s\n", packagesToLoad[i]);
+		}
+		else
+		{
+			for (int j = 0; j < Files.Num(); j++)
+			{
+				UnPackage* Package = UnPackage::LoadPackage(Files[j]->RelativeName);
+				Packages.Add(Package);
+			}
+		}
+	}
+
+#if !HAS_UI
+	if (!Packages.Num())
+	{
+		CommandLineError("failed to load provided packages");
+	}
+#else
+	if (!Packages.Num())
+	{
+		if (mainCmd != CMD_View)
+		{
+			CommandLineError("failed to load provided packages");
+		}
+		else
+		{
+			// open package selection UI
+			if (!GApplication.ShowPackageUI())
+				return 0;		// user has cancelled the dialog when it appears for the first time
+			goto main_loop;
+		}
+	}
+#endif // HAS_UI
 
 	if (mainCmd == CMD_List)
 	{
 		guard(List);
 		// dump package exports table
+		UnPackage* MainPackage = Packages[0];	//!! TODO: may be work with multiple packages here - not hard, but will require additional output formatting
 		for (int i = 0; i < MainPackage->Summary.ExportCount; i++)
 		{
 			const FObjectExport &Exp = MainPackage->ExportTable[i];
@@ -865,18 +1085,7 @@ int main(int argc, char **argv)
 	}
 
 	// register exporters and classes
-	InitClassAndExportSystems(MainPackage->Game);
-
-	// preload all extra packages first
-	Packages.AddItem(MainPackage);	// already loaded
-	for (int i = 0; i < extraPackages.Num(); i++)
-	{
-		UnPackage *Package2 = UnPackage::LoadPackage(extraPackages[i]);
-		if (!Package2)
-			appPrintf("WARNING: unable to find/load package %s\n", extraPackages[i]);
-		else
-			Packages.AddItem(Package2);
-	}
+	InitClassAndExportSystems(Packages[0]->Game);
 
 	if (mainCmd == CMD_PkgInfo)
 	{
@@ -884,12 +1093,12 @@ int main(int argc, char **argv)
 		return 0;					// already displayed when loaded package; extend it?
 	}
 
-	// get requested object info
+	// load requested objects if any, or fully load everything
+	UObject::BeginLoad();
 	if (objectsToLoad.Num())
 	{
 		// selectively load objects
 		int totalFound = 0;
-		UObject::BeginLoad();
 		for (int objIdx = 0; objIdx < objectsToLoad.Num(); objIdx++)
 		{
 			const char *objName   = objectsToLoad[objIdx];
@@ -909,12 +1118,11 @@ int main(int argc, char **argv)
 					totalFound++;
 					appPrintf("Export \"%s\" was found in package \"%s\"\n", objName, Package2->Filename);
 
-					const char *realClassName = Package2->GetObjectName(Package2->ExportTable[idx].ClassIndex);
 					// create object from package
 					UObject *Obj = Package2->CreateExport(idx);
 					if (Obj)
 					{
-						Objects.AddItem(Obj);
+						Objects.Add(Obj);
 						if (objName == attachAnimName && (Obj->IsA("MeshAnimation") || Obj->IsA("AnimSet")))
 							GForceAnimSet = Obj;
 					}
@@ -928,7 +1136,6 @@ int main(int argc, char **argv)
 			}
 		}
 		appPrintf("Found %d object(s)\n", totalFound);
-		UObject::EndLoad();
 	}
 	else
 	{
@@ -936,6 +1143,7 @@ int main(int argc, char **argv)
 		for (int pkg = 0; pkg < Packages.Num(); pkg++)
 			LoadWholePackage(Packages[pkg]);
 	}
+	UObject::EndLoad();
 
 	if (!UObject::GObjObjects.Num() && !GApplication.GuiShown)
 	{
@@ -1003,11 +1211,14 @@ int main(int argc, char **argv)
 #if HAS_UI
 		// Put argPkgName into package selection dialog, so when opening a package window for the first
 		// time, currently opened package will be selected
-		if (!GApplication.GuiShown) GApplication.SetPackageName(MainPackage->Filename);
+		if (!GApplication.GuiShown) GApplication.SetPackage(Packages[0]);
 #endif // HAS_UI
 	main_loop:
 		// show object
 		vpInvertXAxis = true;
+	#if HAS_UI
+		UISetExceptionHandler(ExceptionHandler);
+	#endif
 		GApplication.VisualizerLoop(APP_CAPTION);
 	}
 #endif // RENDERING
@@ -1015,29 +1226,15 @@ int main(int argc, char **argv)
 //	ReleaseAllObjects();
 #if DUMP_MEM_ON_EXIT
 	//!! note: CUmodelApp is not destroyed here
-	appPrintf("Memory: allocated %d bytes in %d blocks\n", GTotalAllocationSize, GTotalAllocationCount);
+	appPrintf("Memory: allocated " FORMAT_SIZE("d") " bytes in %d blocks\n", GTotalAllocationSize, GTotalAllocationCount);
 	appDumpMemoryAllocations();
 #endif
 
-	unguardf("umodel_version=%s", STR(GIT_REVISION));	// using string constant to allow non-git builds (with GIT_REVISION 'unknown')
+	unguardf("umodel_build=%s", STR(GIT_REVISION));	// using string constant to allow non-git builds (with GIT_REVISION 'unknown')
 
 #if DO_GUARD
 	} CATCH_CRASH {
-		if (GErrorHistory[0])
-		{
-//			appPrintf("ERROR: %s\n", GErrorHistory);
-			appNotify("ERROR: %s\n", GErrorHistory);
-		}
-		else
-		{
-//			appPrintf("Unknown error\n");
-			appNotify("Unknown error\n");
-		}
-	#if HAS_UI
-		if (GApplication.GuiShown)
-			GApplication.ShowErrorDialog();
-	#endif // HAS_UI
-		exit(1);
+		ExceptionHandler();
 	}
 #endif
 	return 0;

@@ -44,12 +44,17 @@ struct FSkeletalMeshLODInfo
 		PROP_ARRAY(bEnableShadowCasting, bool)
 		PROP_DROP(TriangleSorting)
 		PROP_DROP(TriangleSortSettings)
+		PROP_DROP(bHasBeenSimplified)
 #if FRONTLINES
 		PROP_DROP(bExcludeFromConsoles)
 		PROP_DROP(bCanRemoveForLowDetail)
 #endif
 #if MCARTA
 		PROP_DROP(LODMaterialDrawOrder)
+#endif
+#if MKVSDC
+		PROP_DROP(BonesEnabled)
+		PROP_DROP(UsedForParticleSpawning)
 #endif
 	END_PROP_TABLE
 };
@@ -77,8 +82,28 @@ public:
 		PROP_VECTOR(RelativeLocation)
 		PROP_ROTATOR(RelativeRotation)
 		PROP_VECTOR(RelativeScale)
+#if MKVSDC
+		PROP_DROP(m_EditConst)
+		PROP_DROP(m_SocketName)
+		PROP_DROP(m_RelativeLocation)
+		PROP_DROP(m_RelativeRotation)
+#endif // MKVSDC
 	END_PROP_TABLE
 };
+
+#if MKVSDC
+// MK X USkeleton
+class USkeleton_MK : public UObject
+{
+	DECLARE_CLASS(USkeleton_MK, UObject);
+public:
+	TArray<VJointPos>		BonePos;
+	TArray<FName>			BoneName;
+	TArray<int16>			BoneParent;
+
+	virtual void Serialize(FArchive &Ar);
+};
+#endif // MKVSDC
 
 
 class USkeletalMesh3 : public UObject
@@ -100,6 +125,9 @@ public:
 	bool					EnableTwistBoneFixers;
 	bool					EnableClavicleFixer;
 #endif // BATMAN
+#if MKVSDC
+	USkeleton_MK*			Skeleton;
+#endif
 
 	CSkeletalMesh			*ConvertedMesh;
 
@@ -135,17 +163,20 @@ public:
 		PROP_DROP(ClothTearFactor)
 		PROP_DROP(SourceFilePath)
 		PROP_DROP(SourceFileTimestamp)
-#	if MEDGE
+#if MEDGE
 		PROP_DROP(NumUVSets)
-#	endif
-#	if BATMAN
+#endif
+#if BATMAN
 		PROP_DROP(SkeletonName)
 		PROP_DROP(Stretches)
 		// Batman 2
 		PROP_BOOL(EnableTwistBoneFixers)
 		PROP_BOOL(EnableClavicleFixer)
 		PROP_DROP(ClothingTeleportRefBones)
-#	endif // BATMAN
+#endif // BATMAN
+#if MKVSDC
+		PROP_OBJ(Skeleton)
+#endif
 #if DECLARE_VIEWER_PROPS
 		PROP_ARRAY(Materials, UObject*)
 #endif // DECLARE_VIEWER_PROPS
@@ -174,28 +205,51 @@ struct FRawAnimSequenceTrack
 	DECLARE_STRUCT(FRawAnimSequenceTrack);
 	TArray<FVector>			PosKeys;
 	TArray<FQuat>			RotKeys;
-	TArray<float>			KeyTimes;
+	TArray<float>			KeyTimes;		// UE3: obsolete
+#if UNREAL4
+	TArray<FVector>			ScaleKeys;
+#endif
 
 	BEGIN_PROP_TABLE
 		PROP_ARRAY(PosKeys,  FVector)
 		PROP_ARRAY(RotKeys,  FQuat)
 		PROP_ARRAY(KeyTimes, float)
+#if UNREAL4
+		PROP_ARRAY(ScaleKeys, FVector)
+#endif
 	END_PROP_TABLE
 
 	friend FArchive& operator<<(FArchive &Ar, FRawAnimSequenceTrack &T)
 	{
+		guard(FRawAnimSequenceTrack<<);
+#if UNREAL4
+		if (Ar.Game >= GAME_UE4_BASE)
+		{
+			T.PosKeys.BulkSerialize(Ar);
+			T.RotKeys.BulkSerialize(Ar);
+			if (Ar.ArVer >= VER_UE4_ANIM_SUPPORT_NONUNIFORM_SCALE_ANIMATION)
+			{
+				T.ScaleKeys.BulkSerialize(Ar);
+			}
+			return Ar;
+		}
+#endif // UNREAL4
 		if (Ar.ArVer >= 577)
 		{
 			// newer UE3 version has replaced serializer for this structure
-			Ar << RAW_ARRAY(T.PosKeys) << RAW_ARRAY(T.RotKeys);
+			T.PosKeys.BulkSerialize(Ar);
+			T.RotKeys.BulkSerialize(Ar);
 			// newer version will not serialize times
-			if (Ar.ArVer < 604) Ar << RAW_ARRAY(T.KeyTimes);
+			if (Ar.ArVer < 604) T.KeyTimes.BulkSerialize(Ar);
 			return Ar;
 		}
 		return Ar << T.PosKeys << T.RotKeys << T.KeyTimes;
+		unguard;
 	}
 };
 
+// Note: this enum should be binary compatible with UE4 AnimationCompressionFormat, because
+// it is serialized by value in UAnimSequence4.
 enum AnimationCompressionFormat
 {
 	ACF_None,
@@ -227,6 +281,9 @@ enum AnimationCompressionFormat
 #endif
 #if DISHONORED
 	ACF_EdgeAnim,
+#endif
+#if BLADENSOUL
+	ACF_ZOnlyRLE,
 #endif
 };
 
@@ -261,6 +318,9 @@ _ENUM(AnimationCompressionFormat)
 #endif
 #if DISHONORED
 	_E(ACF_EdgeAnim),
+#endif
+#if BLADENSOUL
+	_E(ACF_ZOnlyRLE),
 #endif
 };
 
@@ -350,8 +410,8 @@ public:
 	AnimationCompressionFormat TranslationCompressionFormat;
 	AnimationCompressionFormat RotationCompressionFormat;
 	AnimationKeyFormat		KeyEncodingFormat;				// GoW2+
-	TArray<int>				CompressedTrackOffsets;
-	TArray<byte>			CompressedByteStream;
+	TArray<int32>			CompressedTrackOffsets;
+	TArray<uint8>			CompressedByteStream;
 	bool					bIsAdditive;
 	FName					AdditiveRefName;
 #if TUROK
@@ -361,16 +421,16 @@ public:
 	UBioAnimSetData			*m_pBioAnimSetData;
 #endif
 #if ARGONAUTS
-	TArray<unsigned>		CompressedTrackTimes;			// used as TArray<word>
+	TArray<unsigned>		CompressedTrackTimes;			// used as TArray<uint16>
 	TArray<int>				CompressedTrackTimeOffsets;
 #endif
 #if BATMAN
-	TArray<byte>			AnimZip_Data;
+	TArray<uint8>			AnimZip_Data;
 #endif
 #if TRANSFORMERS
 	TArray<int>				Tracks;							// Transformers: Fall of Cybertron
 	TArray<int>				TrackOffsets;
-	TArray<byte>			Trans3Data;
+	TArray<uint8>			Trans3Data;
 #endif
 
 	UAnimSequence()
@@ -461,6 +521,13 @@ public:
 		PROP_DROP(ProportionalMotionDistanceCap)
 		// Batman 2
 		PROP_DROP(WeaponSwitchPointEnabled)
+		// Batman 4
+		PROP_DROP(FootSyncOut)
+		PROP_DROP(FootSyncOutSpeed)
+		PROP_DROP(FootSyncOutDirection)
+		PROP_DROP(MotionOptions)
+		PROP_DROP(CollisionOptions2)
+		PROP_DROP(AnimZip_LinearMotion)
 #endif // BATMAN
 #if TRANSFORMERS
 		PROP_DROP(TranslationScale)		//?? use it?
@@ -647,6 +714,9 @@ protected:
 #define REGISTER_MESH_CLASSES_TRANS \
 	REGISTER_CLASS_ALIAS(USkeletalMesh3, USkeletalMeshSkeleton)
 
+#define REGISTER_MESH_CLASSES_MK \
+	REGISTER_CLASS_ALIAS(USkeleton_MK, USkeleton)
+
 // UGolemSkeletalMesh - APB: Reloaded, derived from USkeletalMesh
 // UTdAnimSet - Mirror's Edge, derived from UAnimSet
 #define REGISTER_MESH_CLASSES_U3	\
@@ -658,7 +728,8 @@ protected:
 	REGISTER_CLASS(UAnimSet)		\
 	REGISTER_CLASS_ALIAS(UAnimSet, UTdAnimSet) \
 	REGISTER_CLASS_ALIAS(USkeletalMesh3, USkeletalMesh) \
-	REGISTER_CLASS_ALIAS(UStaticMesh3, UStaticMesh)
+	REGISTER_CLASS_ALIAS(UStaticMesh3, UStaticMesh) \
+	REGISTER_CLASS_ALIAS(UStaticMesh3, UFracturedStaticMesh)
 
 #define REGISTER_MESH_ENUMS_U3		\
 	REGISTER_ENUM(AnimationCompressionFormat) \

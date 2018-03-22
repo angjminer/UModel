@@ -4,8 +4,6 @@
 #include "UnObject.h"
 #include "UnMaterial.h"
 
-#include "UnPackage.h"						// for accessing Game field
-
 #include "UnMaterial2.h"
 #include "UnMaterial3.h"
 
@@ -18,12 +16,22 @@
 #define MAX_IMG_SIZE		4096
 #define BAD_TEXTURE			((GLuint) -2)	// the texture object has permanent error, don't try to upload it again
 
+#if 0
+// profiling
+#define PROFILE_UPLOAD(...)	__VA_ARGS__
+#define PROFILE_SHADER(...)	__VA_ARGS__
+#else
+// no profiling
+#define PROFILE_UPLOAD(...)
+#define PROFILE_SHADER(...)
+#endif
 
 static UTexture *DefaultUTexture = NULL;
 static GLuint GetDefaultTexNum();
 
 
 //#define SHOW_SHADER_PARAMS	1
+//#define DEBUG_MIPS			1			// use to debug decompression of lower mip levels, especially for XBox360
 
 
 /*-----------------------------------------------------------------------------
@@ -187,20 +195,32 @@ static void GetImageDimensions(int width, int height, int* scaledWidth, int* sca
 }
 
 
-static void UploadTex(GLenum target, const void *pic, int width, int height, bool doMipmap)
+// Decompress and upload a texture. Returns false when decompression failed.
+static bool UploadTex(UUnrealMaterial* Tex, GLenum target, CTextureData &TexData, bool doMipmap)
 {
 	guard(UploadTex);
 
+	byte *pic = TexData.Decompress(0);
+	if (!pic)
+	{
+		// some internal decompression error, message should be already printed to log
+		return false;
+	}
+
+	const CMipMap& Mip0 = TexData.Mips[0];
+
 	/*----- Calculate internal dimensions of the new texture --------*/
 	int scaledWidth, scaledHeight;
-	GetImageDimensions(width, height, &scaledWidth, &scaledHeight);
+	GetImageDimensions(Mip0.USize, Mip0.VSize, &scaledWidth, &scaledHeight);
 
-	/*---------------- Resample/lightscale texture ------------------*/
+	/*---------------- Resample texture ------------------*/
+	// Copy or resample texture to new buffer (we will generate mipmaps there later)
 	unsigned *scaledPic = new unsigned [scaledWidth * scaledHeight];
-	if (width != scaledWidth || height != scaledHeight)
-		ResampleTexture((unsigned*)pic, width, height, scaledPic, scaledWidth, scaledHeight);
+	if (Mip0.USize != scaledWidth || Mip0.VSize != scaledHeight)
+		ResampleTexture((unsigned*)pic, Mip0.USize, Mip0.VSize, scaledPic, scaledWidth, scaledHeight);
 	else
 		memcpy(scaledPic, pic, scaledWidth * scaledHeight * sizeof(unsigned));
+	delete pic; // no longer needed
 
 	/*------------- Determine texture format to upload --------------*/
 	GLenum format;
@@ -208,57 +228,119 @@ static void UploadTex(GLenum target, const void *pic, int width, int height, boo
 	format = (alpha ? 4 : 3);
 
 	/*------------------ Upload the image ---------------------------*/
+	// First mipmap
+//	printf("up_uncomp (%s, %d mips): %d %d (%d)\n", Tex->Name, TexData.Mips.Num(), Mip0.USize, Mip0.VSize, TexData.Mips.Num()); //!!
 	glTexImage2D(target, 0, format, scaledWidth, scaledHeight, 0, GL_RGBA, GL_UNSIGNED_BYTE, scaledPic);
-	if (doMipmap)
+
+	// Upload or build other mipmaps
+	if (doMipmap && TexData.Mips.Num() > 1 && GL_SUPPORT(QGL_1_2)) // GL 1.2 is required for GL_TEXTURE_MAX_LEVEL
 	{
-		int miplevel = 0;
+		guard(UploadMips);
+//		printf("upload mips %s\n", Tex->Name); //!!!!
+		// use provided mipmaps; assume all have power-of-2 dimensions
+		glTexParameteri(target, GL_TEXTURE_MAX_LEVEL, TexData.Mips.Num() - 1);
+		for (int mipLevel = 1; mipLevel < TexData.Mips.Num(); mipLevel++)
+		{
+			const CMipMap& Mip = TexData.Mips[mipLevel];
+			byte* pic = TexData.Decompress(mipLevel);
+
+#if DEBUG_MIPS
+			// colorize mip levels
+			static const FVector cc[] = { {1,1,0}, {0,1,1}, {1,0,1}, {1,0,0}, {0,1,0}, {0,0,1} };
+			byte* d = pic;
+			FVector v = cc[min(mipLevel-1, 5)];
+			for (int i = 0; i < Mip.USize * Mip.VSize; i++, d += 4)
+			{
+				float r = d[0], g = d[1], b = d[2];
+				float c = (r + g + b) / 3.0f;
+				d[0] = byte(c * v.X);
+				d[1] = byte(c * v.Y);
+				d[2] = byte(c * v.Z);
+			}
+#endif // DEBUG_MIPS
+
+			assert(pic);
+//			printf("   mip %d x %d (%X)\n", Mip.USize, Mip.VSize, Mip.DataSize); //!!!
+			glTexImage2D(target, mipLevel, format, Mip.USize, Mip.VSize, 0, GL_RGBA, GL_UNSIGNED_BYTE, pic);
+			delete pic;
+		}
+		unguard;
+	}
+	else if (doMipmap)
+	{
+		guard(BuildMips);
+		// build mipmaps
+//		printf("build mips %s\n", Tex->Name); //!!!!
+		int mipLevel = 0;
 		while (scaledWidth > 1 || scaledHeight > 1)
 		{
 			MipMap((byte *) scaledPic, scaledWidth, scaledHeight);
-			miplevel++;
+			mipLevel++;
 			scaledWidth  >>= 1;
 			scaledHeight >>= 1;
 			if (scaledWidth < 1)  scaledWidth  = 1;
 			if (scaledHeight < 1) scaledHeight = 1;
-			glTexImage2D(target, miplevel, format, scaledWidth, scaledHeight, 0, GL_RGBA, GL_UNSIGNED_BYTE, scaledPic);
+			glTexImage2D(target, mipLevel, format, scaledWidth, scaledHeight, 0, GL_RGBA, GL_UNSIGNED_BYTE, scaledPic);
 		}
+		unguard;
 	}
+
+#if DEBUG_MIPS
+	// blur textures to display lower mips
+	glTexEnvf(GL_TEXTURE_FILTER_CONTROL_EXT, GL_TEXTURE_LOD_BIAS_EXT, 3.0f);
+#endif
+
 	delete scaledPic;
+	return true;
 
 	unguard;
 }
 
 
-// Try to upload texture without decompression
-// Return false when not uploaded
+// Try to upload a compressed texture. Returns false when not uploaded (due to hardware restrictions etc).
 static bool UploadCompressedTex(UUnrealMaterial* Tex, GLenum target, GLenum target2, CTextureData &TexData, bool doMipmap)
 {
 	guard(UploadCompressedTex);
 
+#if DEBUG_MIPS
+	return false; // always decompress
+#endif
+
 	Tex->NormalUnpackExpr = NULL;
 
 	// verify GL capabilities
-	if (!GL_SUPPORT(QGL_EXT_TEXTURE_COMPRESSION_S3TC))
-		return false;		// no DXTn support
 	if (!GL_SUPPORT(QGL_1_4))
 		return false;		// cannot automatically generate mipmaps
+	// at this point we have Open GL 1.4+
+
+	const CMipMap& Mip0 = TexData.Mips[0];
 
 	//?? support some other formats too
 	// TPF_V8U8 = GL_RG8_SNORM (GL3.1)
-	//*TPF_BC5  = GL_COMPRESSED_RG_RGTC2 (GL_ARB_texture_compression_rgtc/GL_EXT_texture_compression_rgtc)
-	//*TPF_BC7  = GL_COMPRESSED_RGBA_BPTC_UNORM_ARB (GL_ARB_texture_compression_bptc)
 	// TPF_G8   = GL_LUMINANCE
 	// Notes:
 	// - most formats are uploaded with glTexImage2D(), not with glCompressedTexImage2D()
 	// - formats has different extension requirements (not QGL_EXT_TEXTURE_COMPRESSION_S3TC)
 
-	if (GL_SUPPORT(QGL_1_2) && (TexData.Format == TPF_BGRA8))
+	GLenum format1 = 0, format2 = 0;
+	if (TexData.Format == TPF_BGRA8)
 	{
-		// avoid byte swapping, upload texture "as is"
-		//!! this format is uploaded with glTexImage2D, but all formats below are for glCompressedTexImage2D
+		// GL 1.2 - avoid byte swapping, upload texture "as is"
 		//?? support other uncompressed formats, like A1, G8 etc
-		glTexImage2D(target, 0, 4, TexData.USize, TexData.VSize, 0, GL_BGRA, GL_UNSIGNED_BYTE, TexData.CompressedData);
-		glGenerateMipmapEXT(target);	//!! warning: this function could be slow, perhaps we should use mipmaps from texture data
+		format1 = GL_BGRA;
+		format2 = GL_UNSIGNED_BYTE;
+	}
+	else if (TexData.Format == TPF_RGBA4)
+	{
+		format1 = GL_RGBA;
+		format2 = GL_UNSIGNED_SHORT_4_4_4_4;
+	}
+	if (format1 && format2)
+	{
+		glTexImage2D(target, 0, 4, Mip0.USize, Mip0.VSize, 0, format1, format2, Mip0.CompressedData);
+		//!! support uploading mipmaps here
+		if (doMipmap)
+			glGenerateMipmapEXT(target);
 		return true;
 	}
 
@@ -266,12 +348,15 @@ static bool UploadCompressedTex(UUnrealMaterial* Tex, GLenum target, GLenum targ
 	switch (TexData.Format)
 	{
 	case TPF_DXT1:
+		if (!GL_SUPPORT(QGL_EXT_TEXTURE_COMPRESSION_S3TC)) return false;
 		format = GL_COMPRESSED_RGBA_S3TC_DXT1_EXT;
 		break;
 	case TPF_DXT3:
+		if (!GL_SUPPORT(QGL_EXT_TEXTURE_COMPRESSION_S3TC)) return false;
 		format = GL_COMPRESSED_RGBA_S3TC_DXT3_EXT;
 		break;
 	case TPF_DXT5:
+		if (!GL_SUPPORT(QGL_EXT_TEXTURE_COMPRESSION_S3TC)) return false;
 		format = GL_COMPRESSED_RGBA_S3TC_DXT5_EXT;
 		break;
 //	case TPF_V8U8:
@@ -291,26 +376,59 @@ static bool UploadCompressedTex(UUnrealMaterial* Tex, GLenum target, GLenum targ
 		return false;
 	}
 
+	if (doMipmap && (TexData.Mips.Num() == 1))
+	{
+		// don't generate mipmaps for small compressed images
+		const CMipMap& Mip = TexData.Mips[0];
+		if (Mip.USize < 32 || Mip.VSize < 32)
+			doMipmap = false;
+	}
+
 	if (!doMipmap)
 	{
 		// no mipmaps required
-		glCompressedTexImage2D(target, 0, format, TexData.USize, TexData.VSize, 0, TexData.DataSize, TexData.CompressedData);
+		glCompressedTexImage2D(target, 0, format, Mip0.USize, Mip0.VSize, 0, Mip0.DataSize, Mip0.CompressedData);
 	}
+	else if (TexData.Mips.Num() > 1 && GL_SUPPORT(QGL_1_2)) // GL 1.2 is required for GL_TEXTURE_MAX_LEVEL
+	{
+		guard(UploadMips);
+		// has mipmaps
+//		printf("up (%s, %d mips): %d %d (%d) (%s) (0x%X)\n", Tex->Name, TexData.Mips.Num(), Mip0.USize, Mip0.VSize, TexData.Mips.Num(), TexData.OriginalFormatName, Mip0.DataSize); //!!
+		glTexParameteri(target2, GL_TEXTURE_MAX_LEVEL, TexData.Mips.Num() - 1);
+		for (int mipLevel = 0; mipLevel < TexData.Mips.Num(); mipLevel++)
+		{
+			const CMipMap& Mip = TexData.Mips[mipLevel];
+			glCompressedTexImage2D(target, mipLevel, format, Mip.USize, Mip.VSize, 0, Mip.DataSize, Mip.CompressedData);
+			GLenum error = glGetError();
+//			printf("   mip %d x %d (%X)\n", Mip.USize, Mip.VSize, Mip.DataSize); //!!!
+			if (error != 0)
+			{
+				appNotify("Failed to upload mip %d of texture %s in format 0x%04X: error 0x%X\n", mipLevel, Tex->Name, format, error);
+//				printf("%d x %d (%X)\n", Mip.USize, Mip.VSize, Mip.DataSize); //!!!!
+				break;
+			}
+		}
+		unguard;
+	}
+	// code below generates mipmaps using OpenGL functionality
 	else if (GL_SUPPORT(QGL_EXT_FRAMEBUFFER_OBJECT))
 	{
 		// GL 3.0 or GL_EXT_framebuffer_object
-		glCompressedTexImage2D(target, 0, format, TexData.USize, TexData.VSize, 0, TexData.DataSize, TexData.CompressedData);
-		glGenerateMipmapEXT(target2);	//!! warning: this function could be slow, perhaps we should use mipmaps from texture data
+//		printf("up+build_mips (%s): %d %d (%d) (%s) (%d)\n", Tex->Name, Mip0.USize, Mip0.VSize, TexData.Mips.Num(), TexData.OriginalFormatName, Mip0.DataSize); //!!
+		glCompressedTexImage2D(target, 0, format, Mip0.USize, Mip0.VSize, 0, Mip0.DataSize, Mip0.CompressedData);
+		glGenerateMipmapEXT(target2);
 	}
 	else
 	{
 		// GL 1.4 - set GL_GENERATE_MIPMAP before uploading
 		glTexParameteri(target2, GL_GENERATE_MIPMAP, GL_TRUE);
-		glCompressedTexImage2D(target, 0, format, TexData.USize, TexData.VSize, 0, TexData.DataSize, TexData.CompressedData);
+		glCompressedTexImage2D(target, 0, format, Mip0.USize, Mip0.VSize, 0, Mip0.DataSize, Mip0.CompressedData);
 	}
-	if (glGetError() != 0)
+
+	GLenum error = glGetError();
+	if (error)
 	{
-		appNotify("Failed to upload texture in format 0x%04X", format);
+		appNotify("Failed to upload texture %s in format 0x%04X, error 0x%04X", Tex->Name, format, error);
 		return false;
 	}
 
@@ -325,6 +443,7 @@ static int Upload2D(UUnrealMaterial *Tex, bool doMipmap, bool clampS, bool clamp
 	guard(Upload2D);
 
 	CTextureData TexData;
+	PROFILE_UPLOAD(appResetProfiler());
 	if (!Tex->GetTextureData(TexData))
 	{
 		appPrintf("WARNING: %s %s has no valid mipmaps\n", Tex->GetClassName(), Tex->Name);
@@ -338,15 +457,11 @@ static int Upload2D(UUnrealMaterial *Tex, bool doMipmap, bool clampS, bool clamp
 	if (!UploadCompressedTex(Tex, GL_TEXTURE_2D, GL_TEXTURE_2D, TexData, doMipmap))
 	{
 		// upload uncompressed
-		byte *pic = TexData.Decompress();
-		if (!pic)
+		if (!UploadTex(Tex, GL_TEXTURE_2D, TexData, doMipmap))
 		{
-			// some internal decompression error, message should be already printed to log
 			glDeleteTextures(1, &TexNum);
 			return BAD_TEXTURE;
 		}
-		UploadTex(GL_TEXTURE_2D, pic, TexData.USize, TexData.VSize, doMipmap);
-		delete pic;
 	}
 
 	bool isDefault = (Tex->Package == NULL) && (Tex->Name == "Default");
@@ -359,6 +474,7 @@ static int Upload2D(UUnrealMaterial *Tex, bool doMipmap, bool clampS, bool clamp
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, clampS ? GL_CLAMP : GL_REPEAT);
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, clampT ? GL_CLAMP : GL_REPEAT);
 
+	PROFILE_UPLOAD(appPrintf("Uploaded %s (%dx%d)\n", Tex->Name, TexData.USize, TexData.VSize); appPrintProfiler());
 	return TexNum;
 
 	unguardf("%s'%s'", Tex->GetClassName(), Tex->Name);
@@ -387,26 +503,20 @@ static bool UploadCubeSide(UUnrealMaterial *Tex, bool doMipmap, int side)
 	}
 #endif
 
-	//!! BUGS: does not works with mipmap generation on Intel graphics (other not tested)
-	//!! Works fine when calling glTexParameteri(target2, GL_GENERATE_MIPMAP, GL_TRUE) before 1st side upload
-	//!! GL_INVALID_OPERATION when calling glGenerateMipmapEXT(GL_TEXTURE_CUBE_MAP_ARB) after last face
-	//!! If will not find a working path, should remove target2 from UploadCompressedTex()
-	//?? Info:
-	//?? http://www.opengl.org/sdk/docs/man3/xhtml/glGenerateMipmap.xml
-	doMipmap = false;	//!! workaround?
+	// Automatic mipmap generation doesn't work with cubemaps, so allow mipmaps only for
+	// explicitly provided data.
+	// https://www.opengl.org/sdk/docs/man/html/glGenerateMipmap.xhtml
+	doMipmap = TexData.Mips.Num() > 0;
 
 	GLenum target = GL_TEXTURE_CUBE_MAP_POSITIVE_X_ARB + side;
 	if (!UploadCompressedTex(Tex, target, GL_TEXTURE_CUBE_MAP_ARB, TexData, doMipmap))
 	{
 		// upload uncompressed
-		byte *pic = TexData.Decompress();
-		if (!pic)
+		if (!UploadTex(Tex, target, TexData, doMipmap))
 		{
 			// some internal decompression error, message should be already displayed
 			return false;
 		}
-		UploadTex(target, pic, TexData.USize, TexData.VSize, doMipmap);
-		delete pic;
 	}
 
 	if (side == 5)
@@ -452,6 +562,7 @@ const CShader &GL_UseGenericShader(GenericShaderType type)
 	if (!Sh.IsValid()) Sh.Make(Generic_ush, defines[type]);
 	Sh.Use();
 	Sh.SetUniform("useLighting", glIsEnabled(GL_LIGHTING));
+	Sh.SetUniform("eyeLocation", viewOrigin);
 	return Sh;
 
 	unguardf("type=%d", type);
@@ -654,7 +765,13 @@ void GL_NormalmapShader(CShader &shader, CMaterialParams &Params)
 	glActiveTexture(GL_TEXTURE0);
 
 	//?? should check IsValid before preparing params above (they're needed only once)
-	if (!shader.IsValid()) shader.Make(Normal_ush, defines, subst);
+	//?? (but this will not allow SHOW_SHADER_PARAMS to work)
+	if (!shader.IsValid())
+	{
+		PROFILE_SHADER(appResetProfiler());
+		shader.Make(Normal_ush, defines, subst);
+		PROFILE_SHADER(appPrintf("Compiled shader\n"); appPrintProfiler());
+	}
 	shader.Use();
 
 	shader.SetUniform("diffTex",  I_Diffuse);
@@ -669,6 +786,43 @@ void GL_NormalmapShader(CShader &shader, CMaterialParams &Params)
 	unguard;
 }
 
+
+void UUnrealMaterial::Lock()
+{
+	LockCount++;
+
+//	appPrintf("Lock(%d) %s\n", LockCount, Name);
+
+	if (!IsTexture() && LockCount == 1)
+	{
+		// material
+		TArray<UUnrealMaterial*> Textures;
+		AppendReferencedTextures(Textures);
+		for (int i = 0; i < Textures.Num(); i++)
+			Textures[i]->Lock();
+	}
+}
+
+void UUnrealMaterial::Unlock()
+{
+	assert(LockCount > 0);
+//	appPrintf("Unlock(%d) %s\n", LockCount-1, Name);
+	if (--LockCount > 0) return;
+
+
+	if (IsTexture())
+	{
+		Release();
+	}
+	else
+	{
+		// material
+		TArray<UUnrealMaterial*> Textures;
+		AppendReferencedTextures(Textures);
+		for (int i = 0; i < Textures.Num(); i++)
+			Textures[i]->Unlock();
+	}
+}
 
 void UUnrealMaterial::Release()
 {
@@ -721,6 +875,18 @@ void UUnrealMaterial::SetMaterial()
 	}
 
 	unguardf("%s", Name);
+}
+
+
+void UUnrealMaterial::AppendReferencedTextures(TArray<UUnrealMaterial*>& OutTextures, bool onlyRendered) const
+{
+	guard(UUnrealMaterial::AppendReferencedTextures);
+
+	CMaterialParams Params;
+	GetParams(Params);
+	Params.AppendAllTextures(OutTextures);
+
+	unguard;
 }
 
 
@@ -778,7 +944,7 @@ UUnrealMaterial *UMaterialWithPolyFlags::Create(UUnrealMaterial *OriginalMateria
 	WM->Name      = (OriginalMaterial) ? OriginalMaterial->Name : "None";
 	WM->Material  = OriginalMaterial;
 	WM->PolyFlags = PolyFlags;
-	WrappedMaterials.AddItem(WM);
+	WrappedMaterials.Add(WM);
 //	appNotify("WRAP: %s %X", OriginalMaterial ? OriginalMaterial->Name : "NULL", PolyFlags);
 	return WM;
 }
@@ -791,7 +957,7 @@ static GLuint GetDefaultTexNum()
 		// allocate material
 		DefaultUTexture = new UTexture;
 		DefaultUTexture->bTwoSided = true;
-		DefaultUTexture->Mips.Add();
+		DefaultUTexture->Mips.AddDefaulted();
 		DefaultUTexture->Format = TEXF_RGBA8;
 		DefaultUTexture->Package = NULL;
 		DefaultUTexture->Name = "Default";
@@ -799,7 +965,7 @@ static GLuint GetDefaultTexNum()
 #define TEX_SIZE	64
 		FMipmap &Mip = DefaultUTexture->Mips[0];
 		Mip.USize = Mip.VSize = TEX_SIZE;
-		Mip.DataArray.Add(TEX_SIZE*TEX_SIZE*4);
+		Mip.DataArray.AddUninitialized(TEX_SIZE*TEX_SIZE*4);
 		byte *pic = &Mip.DataArray[0];
 		for (int x = 0; x < TEX_SIZE; x++)
 		{
@@ -1456,6 +1622,37 @@ void UMaterialInterface::GetParams(CMaterialParams &Params) const
 #endif // SUPPORT_IPHONE
 }
 
+static void SetupUE3BlendMode(EBlendMode BlendMode)
+{
+	glDepthMask(BlendMode == BLEND_Translucent ? GL_FALSE : GL_TRUE); // may be, BLEND_Masked too
+
+	if (BlendMode == BLEND_Opaque || BlendMode == BLEND_Masked)
+		glDisable(GL_BLEND);
+	else
+	{
+		glEnable(GL_BLEND);
+		switch (BlendMode)
+		{
+//		case BLEND_Masked:
+//			glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);	//?? should use opacity channel; has lighting
+//			break;
+		case BLEND_Translucent:
+//			glBlendFunc(GL_SRC_COLOR, GL_ONE_MINUS_SRC_COLOR);	//?? should use opacity channel; no lighting
+			glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);	//?? should use opacity channel; no lighting
+			break;
+		case BLEND_Additive:
+			glBlendFunc(GL_ONE, GL_ONE);
+			break;
+		case BLEND_Modulate:
+			glBlendFunc(GL_DST_COLOR, GL_ZERO);
+			break;
+		default:
+			glDisable(GL_BLEND);
+			DrawTextLeft("Unknown BlendMode %d", BlendMode);
+		}
+	}
+}
+
 
 //!! NOTE: when using this function sharing of shader between MaterialInstanceConstant's is impossible
 //!! (shader may differs because of different texture sets - some available, some - not)
@@ -1489,33 +1686,7 @@ void UMaterial3::SetupGL()
 		glEnable(GL_ALPHA_TEST);
 	}
 
-	glDepthMask(BlendMode == BLEND_Translucent ? GL_FALSE : GL_TRUE); // may be, BLEND_Masked too
-
-	if (BlendMode == BLEND_Opaque || BlendMode == BLEND_Masked)
-		glDisable(GL_BLEND);
-	else
-	{
-		glEnable(GL_BLEND);
-		switch (BlendMode)
-		{
-//		case BLEND_Masked:
-//			glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);	//?? should use opacity channel; has lighting
-//			break;
-		case BLEND_Translucent:
-//			glBlendFunc(GL_SRC_COLOR, GL_ONE_MINUS_SRC_COLOR);	//?? should use opacity channel; no lighting
-			glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);	//?? should use opacity channel; no lighting
-			break;
-		case BLEND_Additive:
-			glBlendFunc(GL_ONE, GL_ONE);
-			break;
-		case BLEND_Modulate:
-			glBlendFunc(GL_DST_COLOR, GL_ZERO);
-			break;
-		default:
-			glDisable(GL_BLEND);
-			DrawTextLeft("Unknown BlendMode %d", BlendMode);
-		}
-	}
+	SetupUE3BlendMode(BlendMode);
 
 	unguard;
 }
@@ -1597,6 +1768,9 @@ void UMaterial3::GetParams(CMaterialParams &Params) const
 		Params.EmissiveColor = Color;	\
 		EmcWeight = weight;				\
 	}
+
+	int ArGame = GetGame();
+
 	for (int i = 0; i < ReferencedTextures.Num(); i++)
 	{
 		UTexture3 *Tex = ReferencedTextures[i];
@@ -1607,6 +1781,7 @@ void UMaterial3::GetParams(CMaterialParams &Params) const
 		//!! - may implement with tables + macros
 		//!! - catch normalmap, specular and emissive textures
 		if (appStristr(Name, "noise")) continue;
+		if (appStristr(Name, "detail")) continue;
 
 		DIFFUSE(appStristr(Name, "diff"), 100);
 		NORMAL (appStristr(Name, "norm"), 100);
@@ -1626,13 +1801,14 @@ void UMaterial3::GetParams(CMaterialParams &Params) const
 		DIFFUSE (appStristr(Name, "_DI"), 20);
 //		DIFFUSE (appStristr(Name, "_MA"), 8 );		// The Last Remnant; low priority
 		DIFFUSE (appStristr(Name, "_D" ), 11);
+		DIFFUSE (appStristr(Name, "Albedo"), 19);
 		DIFFUSE (!stricmp(Name + len - 2, "_C"), 10);
 		DIFFUSE (!stricmp(Name + len - 3, "_CM"), 12);
 		NORMAL  (!stricmp(Name + len - 2, "_N"), 20);
 		NORMAL  (!stricmp(Name + len - 3, "_NM"), 20);
 		NORMAL  (appStristr(Name, "_N"), 9);
 #if BULLETSTORM
-		if (Package->Game == GAME_Bulletstorm)
+		if (ArGame == GAME_Bulletstorm)
 		{
 			DIFFUSE (appStristr(Name, "_C"), 12);
 			NORMAL(appStristr(Name, "_TS"), 5);
@@ -1673,6 +1849,24 @@ void UMaterial3::GetParams(CMaterialParams &Params) const
 	unguard;
 }
 
+void UMaterial3::AppendReferencedTextures(TArray<UUnrealMaterial*>& OutTextures, bool onlyRendered) const
+{
+	guard(UMaterial3::AppendReferencedTextures);
+	if (onlyRendered)
+	{
+		// default implementation does that
+		Super::AppendReferencedTextures(OutTextures, onlyRendered);
+	}
+	else
+	{
+		for (int i = 0; i < ReferencedTextures.Num(); i++)
+		{
+			if (ReferencedTextures[i])
+				OutTextures.AddUnique(ReferencedTextures[i]);
+		}
+	}
+	unguard;
+}
 
 bool UTexture2D::Upload()
 {
@@ -1714,6 +1908,7 @@ void UTexture2D::Release()
 	guard(UTexture2D::Release);
 	if (GL_IsValidObject(TexNum, DrawTimestamp))
 		glDeleteTextures(1, &TexNum);
+	ReleaseTextureData();
 	Super::Release();
 	unguard;
 }
@@ -1755,7 +1950,12 @@ bool UTextureCube::Upload()
 			break;
 		}
 
-		if (!UploadCubeSide(Tex, Tex->Mips.Num() > 1, side))
+		bool success = UploadCubeSide(Tex, Tex->Mips.Num() > 1, side);
+		// release bulk data immediately
+		//!! better - use Lock (when uploaded)/Unlock (when destroyed/released) for referenced textures
+		Tex->ReleaseTextureData();
+
+		if (!success)
 		{
 			glDeleteTextures(1, &TexNum);
 			TexNum = BAD_TEXTURE;
@@ -1811,6 +2011,23 @@ void UMaterialInstanceConstant::SetupGL()
 {
 	// redirect to Parent until UMaterial3
 	if (Parent) Parent->SetupGL();
+
+#if UNREAL4
+	if (BasePropertyOverrides.bOverride_TwoSided)
+	{
+		if (BasePropertyOverrides.TwoSided)
+			glDisable(GL_CULL_FACE);
+		else
+		{
+			glEnable(GL_CULL_FACE);
+			glCullFace(GL_BACK);
+		}
+	}
+	if (BasePropertyOverrides.bOverride_BlendMode)
+	{
+		SetupUE3BlendMode(BasePropertyOverrides.BlendMode);
+	}
+#endif // UNREAL4
 }
 
 
@@ -1824,11 +2041,12 @@ void UMaterialInstanceConstant::GetParams(CMaterialParams &Params) const
 	Super::GetParams(Params);
 
 	// get local parameters
-	bool normalSet = false;
 	int DiffWeight = 0, NormWeight = 0, SpecWeight = 0, SpecPowWeight = 0, OpWeight = 0, EmWeight = 0, EmcWeight = 0, CubeWeight = 0, MaskWeight = 0;
 
 	if (TextureParameterValues.Num())
 		Params.Opacity = NULL;			// it's better to disable opacity mask from parent material
+
+	int ArGame = GetGame();
 
 	int i;
 	for (i = 0; i < TextureParameterValues.Num(); i++)
@@ -1838,7 +2056,10 @@ void UMaterialInstanceConstant::GetParams(CMaterialParams &Params) const
 		UTexture3  *Tex  = P.ParameterValue;
 		if (!Tex) continue;
 
+		if (appStristr(Name, "detail")) continue;	// details normal etc
+
 		DIFFUSE (appStristr(Name, "dif"), 100);
+		DIFFUSE (appStristr(Name, "albedo"), 100);
 		DIFFUSE (appStristr(Name, "color"), 80);
 		NORMAL  (appStristr(Name, "norm") && !appStristr(Name, "fx"), 100);
 		SPECPOW (appStristr(Name, "specpow"), 100);
@@ -1851,7 +2072,7 @@ void UMaterialInstanceConstant::GetParams(CMaterialParams &Params) const
 //??		OPACITY (appStristr(Name, "mask"), 100);
 //??		Params.OpacityFromAlpha = true;
 #if TRON
-		if (Package->Game == GAME_Tron)
+		if (ArGame == GAME_Tron)
 		{
 			SPECPOW (appStristr(Name, "SPPW"), 100);
 			EMISSIVE(appStristr(Name, "Emss"), 100);
@@ -1859,20 +2080,20 @@ void UMaterialInstanceConstant::GetParams(CMaterialParams &Params) const
 		}
 #endif // TRON
 #if BATMAN
-		if (Package->Game == GAME_Batman2)
+		if (ArGame == GAME_Batman2)
 		{
 			BAKEDMASK(!stricmp(Name, "Material_Attributes"), 100);
 			EMISSIVE (appStristr(Name, "Reflection_Mask"), 100);
 		}
 #endif // BATMAN
 #if BLADENSOUL
-		if (Package->Game == GAME_BladeNSoul)
+		if (ArGame == GAME_BladeNSoul)
 		{
 			BAKEDMASK(!stricmp(Name, "Body_mask_RGB"), 100);
 		}
 #endif // BLADENSOUL
 #if DISHONORED
-		if (Package->Game == GAME_Dishonored)
+		if (ArGame == GAME_Dishonored)
 		{
 			CUBEMAP (appStristr(Name, "cubemap_tex"), 100);
 			EMISSIVE(appStristr(Name, "cubemap_mask"), 100);
@@ -1886,7 +2107,7 @@ void UMaterialInstanceConstant::GetParams(CMaterialParams &Params) const
 		const FLinearColor &Color = P.ParameterValue;
 		EMISSIVE_COLOR(appStristr(Name, "Emissive"), 100);
 #if TRON
-		if (Package->Game == GAME_Tron)
+		if (ArGame == GAME_Tron)
 		{
 			EMISSIVE_COLOR(appStristr(Name, "PipingColour"), 90);
 		}
@@ -1894,7 +2115,7 @@ void UMaterialInstanceConstant::GetParams(CMaterialParams &Params) const
 	}
 
 #if TRON
-	if (Package->Game == GAME_Tron)
+	if (ArGame == GAME_Tron)
 	{
 		if (Params.Mask && Params.SpecPower && Params.Emissive)
 			Params.Mask = NULL;		// some different meaning for this texture
@@ -1909,7 +2130,7 @@ void UMaterialInstanceConstant::GetParams(CMaterialParams &Params) const
 #endif // TRON
 
 #if BATMAN
-	if (Package->Game == GAME_Batman2)
+	if (ArGame == GAME_Batman2)
 	{
 		if (Params.Mask)
 		{
@@ -1921,7 +2142,7 @@ void UMaterialInstanceConstant::GetParams(CMaterialParams &Params) const
 #endif // BATMAN
 
 #if BLADENSOUL
-	if (Package->Game == GAME_BladeNSoul)
+	if (ArGame == GAME_BladeNSoul)
 	{
 		if (Params.Mask)
 		{
@@ -1939,6 +2160,25 @@ void UMaterialInstanceConstant::GetParams(CMaterialParams &Params) const
 	unguard;
 }
 
+void UMaterialInstanceConstant::AppendReferencedTextures(TArray<UUnrealMaterial*>& OutTextures, bool onlyRendered) const
+{
+	guard(UMaterialInstanceConstant::AppendReferencedTextures);
+	if (onlyRendered)
+	{
+		// default implementation does that
+		Super::AppendReferencedTextures(OutTextures, onlyRendered);
+	}
+	else
+	{
+		for (int i = 0; i < TextureParameterValues.Num(); i++)
+		{
+			if (TextureParameterValues[i].ParameterValue)
+				OutTextures.AddUnique(TextureParameterValues[i].ParameterValue);
+		}
+		if (Parent) Parent->AppendReferencedTextures(OutTextures, onlyRendered);
+	}
+	unguard;
+}
 
 #endif // UNREAL3
 

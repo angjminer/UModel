@@ -14,7 +14,7 @@ UE1 CLASS TREE:
 -----------------------------------------------------------------------------*/
 
 //?? declare separately? place to UnCore?
-float half2float(word h);
+float half2float(uint16 h);
 
 struct FPackedNormal;
 struct CMeshVertex;
@@ -24,14 +24,14 @@ void UnpackNormals(const FPackedNormal SrcNormal[3], CMeshVertex &V);
 class CSkeletalMesh;
 struct CSkelMeshLod;
 class CAnimSet;
-struct CAnimSequence;
+class CAnimSequence;
 class CStaticMesh;
 
 
 //?? Eliminate GET_DWORD() macro - it could be compiler- and endian-dependent,
 //?? unpack "unsigned int" manually.
 //?? After that, can remove #include UnMesh.h from some places.
-#define GET_DWORD(v) (*(unsigned*)&(v))
+#define GET_DWORD(v) (*(uint32*)&(v))
 
 
 /*-----------------------------------------------------------------------------
@@ -56,8 +56,8 @@ SIMPLE_TYPE(FMeshUVFloat, float)
 
 struct FMeshUVHalf
 {
-	short			U;
-	short			V;
+	uint16			U;
+	uint16			V;
 
 	friend FArchive& operator<<(FArchive &Ar, FMeshUVHalf &V)
 	{
@@ -74,7 +74,7 @@ struct FMeshUVHalf
 	}
 };
 
-SIMPLE_TYPE(FMeshUVHalf, word)
+SIMPLE_TYPE(FMeshUVHalf, uint16)
 
 
 //
@@ -128,12 +128,13 @@ struct FMeshBone
 
 	friend FArchive& operator<<(FArchive &Ar, FMeshBone &B)
 	{
+		guard(FMeshBone<<);
 #if XIII
 		if (Ar.Game == GAME_XIII && Ar.ArLicenseeVer > 26)					// real version is unknown; beta = old code, retail = new code
 			return Ar << B.Name << B.Flags << B.BonePos << B.ParentIndex;	// no NumChildren
 #endif // XIII
 #if BATMAN
-		if ((Ar.Game == GAME_Batman2 || Ar.Game == GAME_Batman3) && Ar.ArLicenseeVer >= 31)
+		if (Ar.Game >= GAME_Batman2 && Ar.Game <= GAME_Batman4 && Ar.ArLicenseeVer >= 31)
 		{
 			Ar << B.BonePos << B.Name << B.ParentIndex;						// no Flags and NumChildren fields
 			goto ue3_unk;
@@ -171,6 +172,7 @@ struct FMeshBone
 		}
 #endif // UNREAL3
 		return Ar;
+		unguard;
 	}
 };
 
